@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "eat-inventory",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "C:\\Users\\Jaidityaa Jain\\OneDrive\\Desktop\\eat-inventory",
+        "run",
+        "dev"
+      ],
+      "port": 3000
+    }
+  ]
+}
