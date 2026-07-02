@@ -4,6 +4,7 @@ import { syncLog } from "@/lib/db/schema";
 import { zohoConfig } from "@/lib/zoho/config";
 import { PageHeader, Card } from "@/components/PageHeader";
 import { SyncPanel } from "@/components/SyncPanel";
+import { ResetPanel } from "@/components/ResetPanel";
 import { requireAdmin } from "@/lib/auth/rbac";
 
 export const dynamic = "force-dynamic";
@@ -26,11 +27,11 @@ export default async function SyncPage() {
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase tracking-wide text-neutral-400">
               <tr>
-                <th className="py-1.5 font-medium">Entity</th>
-                <th className="py-1.5 font-medium">Status</th>
-                <th className="py-1.5 text-right font-medium">Rows</th>
-                <th className="py-1.5 font-medium">Started</th>
-                <th className="py-1.5 font-medium">Error</th>
+                <th className="px-3 py-1.5 font-medium">Entity</th>
+                <th className="px-3 py-1.5 font-medium">Status</th>
+                <th className="px-3 py-1.5 text-right font-medium">Rows</th>
+                <th className="px-3 py-1.5 font-medium">Started</th>
+                <th className="px-3 py-1.5 font-medium">Error</th>
               </tr>
             </thead>
             <tbody>
@@ -43,18 +44,20 @@ export default async function SyncPage() {
               )}
               {logs.map((l) => (
                 <tr key={l.id} className="border-t border-neutral-50">
-                  <td className="py-1.5">{l.entity}</td>
-                  <td className="py-1.5">{l.status}</td>
-                  <td className="py-1.5 text-right font-mono">{l.rowsPulled ?? 0}</td>
-                  <td className="py-1.5 text-neutral-500">
+                  <td className="px-3 py-1.5">{l.entity}</td>
+                  <td className="px-3 py-1.5">{l.status}</td>
+                  <td className="px-3 py-1.5 text-right font-mono">{l.rowsPulled ?? 0}</td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-neutral-500">
                     {new Date(l.startedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
                   </td>
-                  <td className="py-1.5 text-red-500">{l.error}</td>
+                  <td className="px-3 py-1.5 text-red-500">{l.error}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </Card>
+
+        {process.env.ALLOW_RESET === "true" && <ResetPanel />}
       </div>
     </div>
   );

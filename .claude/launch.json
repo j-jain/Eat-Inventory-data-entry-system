@@ -3,14 +3,23 @@
   "configurations": [
     {
       "name": "eat-inventory",
-      "runtimeExecutable": "npm",
+      "runtimeExecutable": "npm.cmd",
       "runtimeArgs": [
-        "--prefix",
-        "C:\\Users\\Jaidityaa Jain\\OneDrive\\Desktop\\eat-inventory",
         "run",
         "dev"
       ],
-      "port": 3000
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "eat-inventory-prod",
+      "runtimeExecutable": "npm.cmd",
+      "runtimeArgs": [
+        "run",
+        "start"
+      ],
+      "port": 3000,
+      "autoPort": true
     }
   ]
 }

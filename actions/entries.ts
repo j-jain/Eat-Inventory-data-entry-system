@@ -30,10 +30,10 @@ import {
 import { requireUser, requireSupervisor } from "@/lib/auth/rbac";
 import { locationId } from "@/lib/locations";
 import { COLD_ROOM, DC_FLOOR_FG } from "@/lib/constants";
-import { sub, qtyStr, gt, lt } from "@/lib/money";
+import { sub, qtyStr, gt, lt, sumQty } from "@/lib/money";
 
 export type ActionResult =
-  | { ok: true; docId: number }
+  | { ok: true; docId: number; count?: number }
   | { ok: false; error: string };
 
 function istToday(): string {
@@ -154,6 +154,115 @@ export async function submitReceiving(
   }
 }
 
+/* ---- Receiving (batch: one sheet covering many open POs) ---- */
+const ReceivingBatchSchema = z.object({
+  clientToken: z.string().min(8).optional(),
+  pos: z
+    .array(
+      z.object({
+        zohoPoId: z.string().optional(),
+        poNo: z.string().optional(),
+        lines: z
+          .array(
+            z.object({
+              skuId: z.number().int(),
+              acceptedQty: qtyField,
+              poExpectedQty: qtyField.optional(),
+              uom: z.enum(["kg", "g", "pc", "box", "bunch", "unit"]).default("kg"),
+            }),
+          )
+          .min(1),
+      }),
+    )
+    .min(1),
+});
+
+/**
+ * Receive against several open POs from one sheet: creates one POSTED
+ * receiving doc per PO (atomic, all-or-nothing). Idempotent via a per-PO client
+ * token so a retry on weak wifi can't double-post any single PO.
+ */
+export async function submitReceivingBatch(
+  input: z.input<typeof ReceivingBatchSchema>,
+): Promise<ActionResult> {
+  const s = await requireUser();
+  const p = ReceivingBatchSchema.parse(input);
+  const businessDate = istToday();
+  const cr = await locationId(COLD_ROOM);
+  try {
+    const docIds = await db.transaction(async (tx: Tx) => {
+      const ids: number[] = [];
+      for (let i = 0; i < p.pos.length; i++) {
+        const po = p.pos[i];
+        const token = p.clientToken
+          ? `${p.clientToken}:${po.zohoPoId ?? "manual"}:${i}`
+          : undefined;
+        if (token) {
+          const ex = await tx
+            .select({ id: receivingDoc.id })
+            .from(receivingDoc)
+            .where(eq(receivingDoc.clientToken, token));
+          if (ex[0]) {
+            ids.push(ex[0].id as number);
+            continue;
+          }
+        }
+        const [doc] = await tx
+          .insert(receivingDoc)
+          .values({
+            vendorId: null,
+            poNo: po.poNo,
+            zohoPoId: po.zohoPoId,
+            businessDate,
+            clientToken: token,
+            createdByUserId: s.uid,
+          })
+          .returning({ id: receivingDoc.id });
+
+        const movements: MovementInput[] = [];
+        for (const ln of po.lines) {
+          const [line] = await tx
+            .insert(receivingLine)
+            .values({
+              docId: doc.id,
+              skuId: ln.skuId,
+              acceptedQty: ln.acceptedQty,
+              poExpectedQty: ln.poExpectedQty ?? null,
+              uom: ln.uom,
+            })
+            .returning({ id: receivingLine.id });
+          movements.push({
+            skuId: ln.skuId,
+            locationId: cr,
+            qtySigned: ln.acceptedQty,
+            uom: ln.uom,
+            movementType: "RECEIPT",
+            docLineId: line.id,
+          });
+        }
+        await applyMovements(tx, movements, {
+          docType: "RECEIVING",
+          docId: doc.id,
+          businessDate,
+          userId: s.uid,
+        });
+        await tx
+          .update(receivingDoc)
+          .set({ docStatus: "POSTED" })
+          .where(eq(receivingDoc.id, doc.id));
+        ids.push(doc.id as number);
+      }
+      return ids;
+    });
+    revalidatePath("/dashboard");
+    revalidatePath("/receiving");
+    revalidatePath("/sorting");
+    return { ok: true, docId: docIds[0] ?? 0, count: docIds.length };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
 /* ------------------------------------------------------------------ Sorting */
 const SortingSchema = baseHeader.extend({
   isRecheck: z.boolean().default(false),
@@ -199,8 +308,9 @@ export async function submitSorting(
 
       const movements: MovementInput[] = [];
       for (const ln of p.lines) {
-        // waste auto = sorted - (a+b+c); enforced by DB CHECK + generated col
-        const waste = sub(ln.sortedQty, qtyStr(Number(ln.qtyA) + Number(ln.qtyB) + Number(ln.qtyC)));
+        // waste auto = sorted - (a+b+c); enforced by DB CHECK + generated col.
+        // Decimal sum (not native floats) so it can't drift by ~0.001.
+        const waste = sub(ln.sortedQty, sumQty([ln.qtyA, ln.qtyB, ln.qtyC]));
         const [line] = await tx
           .insert(sortingLine)
           .values({
@@ -258,6 +368,7 @@ const AssemblySchema = baseHeader.extend({
         qtyIn: qtyField.default("0"),
         packsMade: qtyField,
         packSizeText: z.string().optional(),
+        uom: z.enum(["kg", "g", "pc", "box", "bunch", "unit"]).default("pc"),
       }),
     )
     .min(1),
@@ -321,7 +432,7 @@ export async function submitAssembly(
           skuId: ln.packSkuId,
           locationId: fg,
           qtySigned: ln.packsMade,
-          uom: "pc",
+          uom: ln.uom,
           movementType: "PACK_PRODUCE",
           docLineId: line.id,
         });

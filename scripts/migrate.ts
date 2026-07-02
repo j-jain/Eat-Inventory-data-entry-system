@@ -14,16 +14,18 @@ async function main() {
   const migrationsFolder = "./drizzle";
 
   if (url) {
-    const { Pool, neonConfig } = await import("@neondatabase/serverless");
-    const ws = (await import("ws")).default;
-    neonConfig.webSocketConstructor = ws;
-    const { drizzle } = await import("drizzle-orm/neon-serverless");
-    const { migrate } = await import("drizzle-orm/neon-serverless/migrator");
-    const pool = new Pool({ connectionString: url });
+    const pg = (await import("pg")).default;
+    const { drizzle } = await import("drizzle-orm/node-postgres");
+    const { migrate } = await import("drizzle-orm/node-postgres/migrator");
+    const isLocal = /localhost|127\.0\.0\.1/.test(url);
+    const pool = new pg.Pool({
+      connectionString: url,
+      ssl: isLocal ? undefined : { rejectUnauthorized: false },
+    });
     const db = drizzle(pool);
     await migrate(db, { migrationsFolder });
     await pool.end();
-    console.log("✓ migrated (Neon)");
+    console.log("✓ migrated (Postgres)");
   } else {
     const { PGlite } = await import("@electric-sql/pglite");
     const { drizzle } = await import("drizzle-orm/pglite");

@@ -8,16 +8,9 @@ import {
   syncVendors,
   syncCustomers,
   syncPurchaseOrders,
-  syncInvoices,
 } from "@/lib/zoho/sync";
 
-export type SyncEntity =
-  | "items"
-  | "vendors"
-  | "customers"
-  | "pos"
-  | "invoices"
-  | "all";
+export type SyncEntity = "items" | "vendors" | "customers" | "pos" | "all";
 
 export type SyncResult = { ok: true; rows: number } | { ok: false; error: string };
 
@@ -36,7 +29,6 @@ export async function runZohoSync(entity: SyncEntity): Promise<SyncResult> {
     if (entity === "vendors" || entity === "all") rows += await syncVendors();
     if (entity === "customers" || entity === "all") rows += await syncCustomers();
     if (entity === "pos" || entity === "all") rows += await syncPurchaseOrders();
-    if (entity === "invoices" || entity === "all") rows += await syncInvoices();
     revalidatePath("/admin/sync");
     revalidatePath("/purchase-orders");
     revalidatePath("/dashboard");

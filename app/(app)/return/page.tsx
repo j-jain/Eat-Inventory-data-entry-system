@@ -1,22 +1,19 @@
 import { PageHeader, Card } from "@/components/PageHeader";
 import { EntryForm } from "@/components/EntryForm";
 import { submitReturn } from "@/actions/entries";
-import { allActiveSkus, customers, recentInvoices } from "@/lib/queries";
+import { customerInvoices, invoiceLines } from "@/actions/returns";
+import { allActiveSkus, customers } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReturnPage() {
-  const [all, clist, invs] = await Promise.all([
-    allActiveSkus(),
-    customers(),
-    recentInvoices(),
-  ]);
+  const [all, clist] = await Promise.all([allActiveSkus(), customers()]);
   const packs = all.filter((s) => s.motherSkuId);
   return (
     <div>
       <PageHeader
         title="Returns"
-        subtitle="Match a Zoho sales invoice (else marked pending). Resalable returns re-enter cold room by weighed kg; waste returns are recorded only."
+        subtitle="Pick the customer, then the invoice it's returned against — its items fill in automatically. Enter qty returned, weighed kg and disposition. Resalable returns re-enter cold room as their mother SKU; waste returns are recorded only."
       />
       <Card>
         <EntryForm
@@ -25,11 +22,8 @@ export default async function ReturnPage() {
           packSkus={packs}
           allSkus={all}
           customers={clist}
-          invoices={invs.map((i) => ({
-            zohoInvoiceId: i.zohoInvoiceId,
-            invoiceNumber: i.invoiceNumber,
-            customerName: i.customerName,
-          }))}
+          loadInvoices={customerInvoices}
+          loadInvoiceLines={invoiceLines}
         />
       </Card>
     </div>

@@ -6,6 +6,13 @@ export const LOCATIONS = [
 export const COLD_ROOM = "COLD_ROOM";
 export const DC_FLOOR_FG = "DC_FLOOR_FG";
 
+/**
+ * Vendors that should never appear on the receiving sheet (non-produce: e.g.
+ * equipment / maintenance suppliers whose POs come through from Zoho). Matched
+ * case-insensitively as a substring of the PO's vendor name. Extend as needed.
+ */
+export const RECEIVING_VENDOR_DENYLIST = ["cold room engineers"];
+
 /** Channels that have a DC Assembly sheet. */
 export const ASSEMBLY_CHANNELS = [
   { key: "BULK_FRUIT", label: "Bulk Fruit", suffix: "-BF" },

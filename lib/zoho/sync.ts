@@ -1,17 +1,40 @@
-import { eq, sql } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   zohoItemCache,
   zohoVendorCache,
   zohoCustomerCache,
   zohoPoCache,
-  zohoInvoiceCache,
   syncLog,
   skus,
 } from "@/lib/db/schema";
 import { zohoConfig } from "./config";
 import { zohoGet, zohoPaged } from "./client";
 import { normalizeCode } from "@/lib/sku";
+
+/**
+ * Watermark for incremental sync: the start time of the last successful sync of
+ * this entity, minus a 10-min overlap buffer (so records modified mid-run aren't
+ * missed). Returns null on the first run → caller does a full pull. This is the
+ * "memory" — no extra table, the sync_log IS the state.
+ */
+export async function lastSyncAt(entity: string): Promise<Date | null> {
+  const rows = await db
+    .select({ startedAt: syncLog.startedAt })
+    .from(syncLog)
+    .where(and(eq(syncLog.entity, entity), eq(syncLog.status, "DONE")))
+    .orderBy(desc(syncLog.id))
+    .limit(1);
+  if (!rows[0]) return null;
+  return new Date(rows[0].startedAt.getTime() - 10 * 60_000);
+}
+
+/** Zoho `last_modified_time` filter — only records changed at/after `since`. */
+function sinceParam(since?: Date): Record<string, string> {
+  if (!since) return {};
+  // Zoho expects e.g. 2024-01-15T10:30:00+0530; we send ISO (UTC, no millis).
+  return { last_modified_time: since.toISOString().replace(/\.\d{3}Z$/, "Z") };
+}
 
 async function runSync(entity: string, fn: () => Promise<number>): Promise<number> {
   const [log] = await db
@@ -38,10 +61,13 @@ async function runSync(entity: string, fn: () => Promise<number>): Promise<numbe
   }
 }
 
-/** Items + stock-on-hand. Upserts item cache; links zoho_item_id onto our SKUs
- *  by normalized code; inserts unknown Zoho items as INACTIVE ZOHO SKUs for review.
- *  Never clobbers LOCAL channel/pack fields. */
-export function syncItems() {
+/**
+ * Items + stock-on-hand — LEAN: only keep/link Zoho items that match an
+ * existing EAT SKU (by normalized code). Non-produce items are skipped entirely
+ * (no catalog bloat). Sets zoho_item_id on the SKU + caches stock for the
+ * opening-balance backfill.
+ */
+export function syncItems(since?: Date) {
   return runSync("ITEM", async () => {
     type Item = {
       item_id: string;
@@ -52,17 +78,30 @@ export function syncItems() {
       rate?: number;
       last_modified_time?: string;
     };
+    // preload EAT sku codes once (in-memory match → no per-item DB lookup)
+    const local = await db
+      .select({ id: skus.id, norm: skus.normalizedCode })
+      .from(skus);
+    const idByNorm = new Map(local.map((r) => [r.norm, r.id]));
+
     const items = await zohoPaged<Item>(`${zohoConfig.inventoryBase}/items`, "items", {
       status: "active",
+      ...sinceParam(since),
     });
+    let matched = 0;
     for (const it of items) {
+      const norm = normalizeCode(it.sku ?? "");
+      if (!norm) continue;
+      const skuId = idByNorm.get(norm);
+      if (!skuId) continue; // skip non-EAT / unknown items (lean scope)
+
       const stock = String(it.actual_available_stock ?? it.stock_on_hand ?? 0);
       await db
         .insert(zohoItemCache)
         .values({
           zohoItemId: String(it.item_id),
           itemName: it.name ?? "",
-          skuText: (it.sku ?? "").toUpperCase(),
+          skuText: norm,
           stockOnHand: stock,
           rate: it.rate != null ? String(it.rate) : null,
           lastModifiedTime: it.last_modified_time,
@@ -71,53 +110,31 @@ export function syncItems() {
           target: zohoItemCache.zohoItemId,
           set: {
             itemName: it.name ?? "",
-            skuText: (it.sku ?? "").toUpperCase(),
+            skuText: norm,
             stockOnHand: stock,
             rate: it.rate != null ? String(it.rate) : null,
             lastModifiedTime: it.last_modified_time,
             fetchedAt: new Date(),
           },
         });
-
-      const norm = normalizeCode(it.sku ?? "");
-      if (!norm) continue;
-      const existing = await db
-        .select({ id: skus.id })
-        .from(skus)
-        .where(eq(skus.normalizedCode, norm));
-      if (existing[0]) {
-        // only set the Zoho link — never touch channel/pack (sheets own those)
-        await db
-          .update(skus)
-          .set({ zohoItemId: String(it.item_id) })
-          .where(eq(skus.id, existing[0].id));
-      } else {
-        await db
-          .insert(skus)
-          .values({
-            code: it.sku ?? String(it.item_id),
-            normalizedCode: norm,
-            name: it.name ?? norm,
-            family: norm.match(/^[A-Z]+/)?.[0] ?? "EAT",
-            skuKind: "MOTHER",
-            channel: "MOTHER",
-            motherCore: norm,
-            uom: "kg",
-            zohoItemId: String(it.item_id),
-            source: "ZOHO",
-            isActive: false, // pending admin review
-          })
-          .onConflictDoNothing({ target: skus.normalizedCode });
-      }
+      await db
+        .update(skus)
+        .set({ zohoItemId: String(it.item_id) })
+        .where(eq(skus.id, skuId));
+      matched++;
     }
-    return items.length;
+    return matched;
   });
 }
 
-export function syncVendors() {
+export function syncVendors(since?: Date) {
   return runSync("VENDOR", async () => {
     type V = { contact_id: string; contact_name?: string; vendor_name?: string };
-    const vs = await zohoPaged<V>(`${zohoConfig.inventoryBase}/vendors`, "contacts");
+    const vs = await zohoPaged<V>(
+      `${zohoConfig.inventoryBase}/vendors`,
+      "contacts",
+      sinceParam(since),
+    );
     for (const v of vs) {
       await db
         .insert(zohoVendorCache)
@@ -134,11 +151,12 @@ export function syncVendors() {
   });
 }
 
-export function syncCustomers() {
+export function syncCustomers(since?: Date) {
   return runSync("CUSTOMER", async () => {
     type C = { contact_id: string; contact_name?: string };
     const cs = await zohoPaged<C>(`${zohoConfig.booksBase}/contacts`, "contacts", {
       contact_type: "customer",
+      ...sinceParam(since),
     });
     for (const c of cs) {
       await db
@@ -153,23 +171,50 @@ export function syncCustomers() {
   });
 }
 
-export function syncPurchaseOrders() {
+type PO = {
+  purchaseorder_id: string;
+  purchaseorder_number?: string;
+  vendor_id?: string;
+  vendor_name?: string;
+  date?: string;
+  status?: string;
+  received_status?: string;
+  last_modified_time?: string;
+};
+
+/** A PO still matters to receiving only until it's fully received / closed. */
+function isOpenPO(p: PO): boolean {
+  const s = (p.status || "").toLowerCase();
+  const rs = (p.received_status || "").toLowerCase();
+  if (["closed", "cancelled", "canceled", "void", "rejected", "draft"].includes(s))
+    return false;
+  if (rs === "received") return false;
+  return true;
+}
+
+/**
+ * Purchase Orders — LEAN: only OPEN / not-fully-received POs (the ones receiving
+ * checks against). Fetches recent summaries (newest first), keeps open ones, and
+ * pulls line-item detail only for those.
+ */
+export function syncPurchaseOrders(since?: Date) {
   return runSync("PO", async () => {
-    type PO = {
-      purchaseorder_id: string;
-      purchaseorder_number?: string;
-      vendor_id?: string;
-      vendor_name?: string;
-      date?: string;
-      status?: string;
-      last_modified_time?: string;
-    };
-    const pos = await zohoPaged<PO>(
+    const summaries = await zohoPaged<PO>(
       `${zohoConfig.inventoryBase}/purchaseorders`,
       "purchaseorders",
+      { sort_column: "date", sort_order: "D", ...sinceParam(since) },
+      10,
     );
-    for (const po of pos) {
-      // fetch detail for line items
+    // Any PO in this window that's no longer open (closed / fully received /
+    // cancelled) is removed from cache so it stops showing on the receiving sheet.
+    const closed = summaries.filter((p) => !isOpenPO(p));
+    for (const po of closed) {
+      await db
+        .delete(zohoPoCache)
+        .where(eq(zohoPoCache.zohoPoId, String(po.purchaseorder_id)));
+    }
+    const open = summaries.filter(isOpenPO);
+    for (const po of open) {
       let lineItems: unknown = null;
       try {
         const detail = await zohoGet<{ purchaseorder?: { line_items?: unknown } }>(
@@ -203,43 +248,6 @@ export function syncPurchaseOrders() {
           },
         });
     }
-    return pos.length;
-  });
-}
-
-export function syncInvoices() {
-  return runSync("INVOICE", async () => {
-    type Inv = {
-      invoice_id: string;
-      invoice_number?: string;
-      customer_id?: string;
-      customer_name?: string;
-      date?: string;
-      last_modified_time?: string;
-    };
-    const invs = await zohoPaged<Inv>(`${zohoConfig.booksBase}/invoices`, "invoices");
-    for (const inv of invs) {
-      await db
-        .insert(zohoInvoiceCache)
-        .values({
-          zohoInvoiceId: String(inv.invoice_id),
-          invoiceNumber: inv.invoice_number,
-          customerZohoId: inv.customer_id,
-          customerName: inv.customer_name,
-          invoiceDate: inv.date ?? null,
-          lastModifiedTime: inv.last_modified_time,
-        })
-        .onConflictDoUpdate({
-          target: zohoInvoiceCache.zohoInvoiceId,
-          set: {
-            invoiceNumber: inv.invoice_number,
-            customerName: inv.customer_name,
-            invoiceDate: inv.date ?? null,
-            lastModifiedTime: inv.last_modified_time,
-            fetchedAt: new Date(),
-          },
-        });
-    }
-    return invs.length;
+    return open.length;
   });
 }

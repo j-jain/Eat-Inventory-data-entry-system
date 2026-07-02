@@ -1,18 +1,18 @@
 import * as schema from "./schema";
-import type { NeonDatabase } from "drizzle-orm/neon-serverless";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 /**
- * Database connection.
+ * Database connection — provider-agnostic.
  *
- * Production (Vercel + Neon): set DATABASE_URL → uses @neondatabase/serverless
- *   Pool over WebSocket, which supports real interactive transactions
- *   (SELECT ... FOR UPDATE), required by the ledger post-service.
+ * Production: set DATABASE_URL to any managed Postgres pooled connection
+ *   (Supabase Mumbai, Neon Singapore, RDS, …) → uses node-postgres, which
+ *   supports real interactive transactions (SELECT ... FOR UPDATE) required by
+ *   the ledger post-service.
  *
  * Local dev / verification (no DATABASE_URL): falls back to PGlite, an
- *   in-process WASM Postgres — no external database needed. Real Postgres,
- *   so generated columns, CHECK constraints and triggers all work.
+ *   in-process WASM Postgres — no external database needed.
  */
-export type DB = NeonDatabase<typeof schema>;
+export type DB = NodePgDatabase<typeof schema>;
 
 declare global {
   // eslint-disable-next-line no-var
@@ -23,15 +23,16 @@ function createDb(): DB {
   const url = process.env.DATABASE_URL;
 
   if (url) {
-    // Neon serverless (WebSocket pool → supports transactions)
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Pool, neonConfig } = require("@neondatabase/serverless");
+    const { Pool } = require("pg");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const ws = require("ws");
-    neonConfig.webSocketConstructor = ws;
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { drizzle } = require("drizzle-orm/neon-serverless");
-    const pool = new Pool({ connectionString: url });
+    const { drizzle } = require("drizzle-orm/node-postgres");
+    const isLocal = /localhost|127\.0\.0\.1/.test(url);
+    const pool = new Pool({
+      connectionString: url,
+      max: Number(process.env.DB_POOL_MAX ?? 5),
+      ssl: isLocal ? undefined : { rejectUnauthorized: false },
+    });
     return drizzle(pool, { schema, casing: "snake_case" }) as DB;
   }
 

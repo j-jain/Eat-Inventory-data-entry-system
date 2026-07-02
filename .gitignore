@@ -37,6 +37,9 @@ yarn-error.log*
 # local PGlite dev database
 /.pglite-data
 
+# internal project wiki (Obsidian vault) — kept local, NOT published to the public repo
+/Inventory data log/
+
 # vercel
 .vercel
 

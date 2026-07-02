@@ -4,11 +4,10 @@ import { useState, useTransition } from "react";
 import { runZohoSync, type SyncEntity } from "@/actions/zoho";
 
 const ENTITIES: { key: SyncEntity; label: string }[] = [
-  { key: "items", label: "Items + stock" },
+  { key: "items", label: "Items + stock (EAT SKUs)" },
   { key: "vendors", label: "Vendors" },
   { key: "customers", label: "Customers" },
-  { key: "pos", label: "Purchase Orders" },
-  { key: "invoices", label: "Invoices" },
+  { key: "pos", label: "Open POs" },
   { key: "all", label: "Everything" },
 ];
 
@@ -58,6 +57,10 @@ export function SyncPanel({ enabled }: { enabled: boolean }) {
           {msg.text}
         </p>
       )}
+      <p className="text-xs text-neutral-400">
+        Lean by design: only EAT SKUs are linked, only open POs are pulled, and
+        invoices are fetched live per-customer during a return (no bulk invoice pull).
+      </p>
     </div>
   );
 }

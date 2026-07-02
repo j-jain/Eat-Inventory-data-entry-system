@@ -15,7 +15,7 @@ const CHANNEL_LABEL: Record<string, string> = {
 export function DashboardClient({ initial }: { initial: LiveStockRow[] }) {
   const [rows, setRows] = useState<LiveStockRow[]>(initial);
   const [q, setQ] = useState("");
-  const [at, setAt] = useState<string>(new Date().toLocaleTimeString());
+  const [at, setAt] = useState<string>("");
 
   useEffect(() => {
     let alive = true;
@@ -32,6 +32,7 @@ export function DashboardClient({ initial }: { initial: LiveStockRow[] }) {
         /* ignore transient network errors */
       }
     };
+    tick(); // refresh on mount (also stamps the "updated" time, client-side only)
     const id = setInterval(tick, 12000);
     return () => {
       alive = false;
@@ -62,7 +63,7 @@ export function DashboardClient({ initial }: { initial: LiveStockRow[] }) {
           className="w-72 rounded-md border border-neutral-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
         />
         <span className="text-xs text-neutral-400">
-          live · {filtered.length} rows · updated {at}
+          live · {filtered.length} rows · updated {at || "…"}
         </span>
       </div>
 

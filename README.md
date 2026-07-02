@@ -46,13 +46,16 @@ npm run dev            # http://localhost:3000
 Default logins (change after first login, in Admin):
 `Admin / 1234`, `Supervisor / 1111`, `Ramesh / 0000`.
 
-## Deploy (Vercel + Neon)
+## Deploy (Vercel + Supabase)
 
-1. Create a Neon Postgres project; copy the pooled connection string.
+**Full step-by-step (Supabase, dedicated read-only Zoho self-client, env vars, daily
+06:30 IST auto-sync): see [DEPLOY.md](DEPLOY.md).** Quick version:
+
+1. Create a managed Postgres DB (Supabase); copy the connection string.
 2. Set Vercel env vars: `DATABASE_URL`, `SESSION_SECRET`, `PIN_PEPPER`
    (and the `ZOHO_*` vars when you want Zoho reads — see `.env.example`).
-3. Apply migrations against Neon: `DATABASE_URL=... npm run db:migrate`,
-   then `DATABASE_URL=... npm run db:seed`.
+3. Apply migrations against Supabase (use the **direct** connection string):
+   `DATABASE_URL=... npm run db:migrate`, then `DATABASE_URL=... npm run db:seed`.
 4. Deploy. Share the URL — staff log in with name + PIN, no install.
 
 When Zoho is configured, run **Admin → Zoho Sync** to pull catalog/POs/vendors/
