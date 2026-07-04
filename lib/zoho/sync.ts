@@ -33,8 +33,9 @@ export async function lastSyncAt(entity: string): Promise<Date | null> {
 /** Zoho `last_modified_time` filter — only records changed at/after `since`. */
 function sinceParam(since?: Date): Record<string, string> {
   if (!since) return {};
-  // Zoho expects e.g. 2024-01-15T10:30:00+0530; we send ISO (UTC, no millis).
-  return { last_modified_time: since.toISOString().replace(/\.\d{3}Z$/, "Z") };
+  // Zoho rejects a bare "Z" suffix — it wants an explicit UTC offset, e.g.
+  // 2024-01-15T10:30:00+00:00.
+  return { last_modified_time: since.toISOString().replace(/\.\d{3}Z$/, "+00:00") };
 }
 
 async function runSync(entity: string, fn: () => Promise<number>): Promise<number> {
