@@ -1,13 +1,26 @@
 @import "tailwindcss";
 
-:root {
-  --background: #f7f7f6;
-  --foreground: #171717;
+/*
+ * EAT brand tokens (from the EAT logo + HoReCa app palette):
+ *   brand  #BFDA3D — EAT lime. Fails WCAG with white text → always pair with
+ *                    dark ink text (bg-brand text-ink), never text-white.
+ *   cream  #F4F6DB — brand cream, page background tint.
+ *   ink    #1c2114 — near-black with a green undertone.
+ */
+@theme {
+  --color-brand: #bfda3d;
+  --color-brand-300: #d4e77a;
+  --color-brand-600: #a8c22e;
+  --color-brand-700: #86a01f;
+  --color-brand-800: #64771a;
+  --color-cream: #f4f6db;
+  --color-cream-50: #fafbef;
+  --color-ink: #1c2114;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+:root {
+  --background: #fafbef; /* cream-50 */
+  --foreground: #1c2114;
 }
 
 html,
@@ -17,4 +30,9 @@ body {
   font-family:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
     sans-serif;
+}
+
+/* iOS momentum + no accidental pull-refresh over the sticky action bars */
+html {
+  -webkit-tap-highlight-color: transparent;
 }

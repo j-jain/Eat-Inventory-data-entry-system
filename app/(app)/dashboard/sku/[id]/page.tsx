@@ -21,7 +21,7 @@ export default async function SkuLedgerPage({
 
   return (
     <div>
-      <Link href="/dashboard" className="text-sm text-emerald-700 hover:underline">
+      <Link href="/dashboard" className="text-sm text-brand-800 hover:underline">
         ← Live Inventory
       </Link>
       <div className="mt-2">
@@ -62,7 +62,7 @@ export default async function SkuLedgerPage({
                   </td>
                   <td className="px-4 py-1.5">{m.movementType}</td>
                   <td className="px-4 py-1.5 text-neutral-500">{m.locationCode}</td>
-                  <td className={`px-4 py-1.5 text-right font-mono ${neg ? "text-red-600" : "text-emerald-700"}`}>
+                  <td className={`px-4 py-1.5 text-right font-mono ${neg ? "text-red-600" : "text-brand-800"}`}>
                     {Number(m.qtySigned).toFixed(3)}
                   </td>
                   <td className="px-4 py-1.5 text-right font-mono">{Number(m.balanceAfter).toFixed(3)}</td>

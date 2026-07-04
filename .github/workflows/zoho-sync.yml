@@ -1,0 +1,31 @@
+# Frequent Zoho sync during warehouse hours (Vercel Hobby allows only one
+# daily cron, so GitHub Actions provides the intra-day schedule).
+#
+# Times are UTC; IST = UTC+5:30:
+#   0 3    → 08:30 IST  (morning baseline, matches the owner's requested 8:30)
+#   30 6,7 → 12:00, 13:00 IST
+#   30 9,11,13 → 15:00, 17:00, 19:00 IST (last run inside the 7–8 PM window)
+# GitHub schedules can jitter by ~15 min — acceptable for PO/SO freshness.
+#
+# Setup (one-time, repo Settings):
+#   secrets.CRON_SECRET = same value as the Vercel env var CRON_SECRET
+#   vars.APP_URL        = https://<your-vercel-deployment-domain>
+name: zoho-sync
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+    - cron: "30 6,7,9,11,13 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping the app's incremental sync endpoint
+        run: |
+          curl -fsS --max-time 240 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ vars.APP_URL }}/api/cron/sync" \
+            | head -c 2000

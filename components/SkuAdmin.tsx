@@ -83,7 +83,7 @@ export function SkuAdmin({ skus }: { skus: SkuRow[] }) {
             type="button"
             onClick={add}
             disabled={pending}
-            className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+            className="rounded-md bg-brand px-4 py-1.5 text-sm font-medium text-ink hover:bg-brand-600 disabled:opacity-50"
           >
             Add
           </button>
@@ -95,7 +95,7 @@ export function SkuAdmin({ skus }: { skus: SkuRow[] }) {
         value={q}
         onChange={(e) => setQ(e.target.value)}
         placeholder="Filter SKUs…"
-        className="w-72 rounded-md border border-neutral-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+        className="w-72 rounded-md border border-neutral-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-600"
       />
 
       <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
@@ -150,7 +150,7 @@ function Inp({
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className={`${wide ? "w-56" : "w-32"} rounded border border-neutral-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+        className={`${wide ? "w-56" : "w-32"} rounded border border-neutral-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-600`}
       />
     </div>
   );
@@ -173,7 +173,7 @@ function Sel({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded border border-neutral-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+        className="rounded border border-neutral-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-600"
       >
         {opts.map((o) => (
           <option key={o} value={o}>

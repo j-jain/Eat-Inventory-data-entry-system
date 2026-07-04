@@ -52,7 +52,7 @@ export function PinLogin({ users }: { users: U[] }) {
         {[0, 1, 2, 3].map((i) => (
           <div
             key={i}
-            className={`h-3 w-3 rounded-full ${i < pin.length ? "bg-emerald-600" : "bg-neutral-300"}`}
+            className={`h-3 w-3 rounded-full ${i < pin.length ? "bg-brand" : "bg-neutral-300"}`}
           />
         ))}
       </div>
@@ -66,7 +66,7 @@ export function PinLogin({ users }: { users: U[] }) {
             disabled={pending}
             className={`rounded-lg py-3 text-lg font-medium ${
               k === "OK"
-                ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                ? "bg-brand text-ink hover:bg-brand-600"
                 : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200"
             } disabled:opacity-50`}
           >

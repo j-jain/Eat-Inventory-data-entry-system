@@ -20,7 +20,12 @@ import { sql } from "drizzle-orm";
 /* =========================================================================
  * Enums
  * =======================================================================*/
-export const userRoleEnum = pgEnum("user_role", ["FLOOR", "SUPERVISOR", "ADMIN"]);
+export const userRoleEnum = pgEnum("user_role", [
+  "FLOOR",
+  "SUPERVISOR",
+  "ADMIN",
+  "MANAGER", // appended (enum order is irrelevant — ranking lives in lib/auth/rbac.ts)
+]);
 export const skuKindEnum = pgEnum("sku_kind", ["MOTHER", "DERIVATIVE"]);
 export const channelEnum = pgEnum("channel", [
   "MOTHER",
@@ -34,6 +39,7 @@ export const locationKindEnum = pgEnum("location_kind", [
   "COLD_ROOM",
   "DC_FLOOR_FG",
   "VIRTUAL",
+  "RECEIVING_BAY",
 ]);
 export const movementTypeEnum = pgEnum("movement_type", [
   "OPENING_BALANCE",
@@ -49,6 +55,9 @@ export const movementTypeEnum = pgEnum("movement_type", [
   "ADJUSTMENT_PLUS",
   "ADJUSTMENT_MINUS",
   "VOID_REVERSAL",
+  // v2: sorting is a transfer Receiving Bay → Cold Room (waste stays explicit)
+  "SORT_OUT", // bay −(A+B+C), the good portion leaving the bay
+  "SORT_IN", // cold room +(A+B+C)
 ]);
 export const docTypeEnum = pgEnum("doc_type", [
   "RECEIVING",
@@ -60,6 +69,9 @@ export const docTypeEnum = pgEnum("doc_type", [
   "DISPATCH",
   "PURCHASE_ORDER",
   "OPENING",
+  "MANUAL_ORDER",
+  "PO_DRAFT",
+  "PICK_LIST",
 ]);
 export const docStatusEnum = pgEnum("doc_status", ["DRAFT", "POSTED", "VOIDED"]);
 export const returnDispEnum = pgEnum("return_disposition", ["RESALABLE", "WASTE"]);
@@ -70,9 +82,30 @@ export const wastageSourceEnum = pgEnum("wastage_source", [
   "RETURN",
   "EXPIRY",
   "GENERAL",
+  "RECEIVING",
 ]);
 export const adjKindEnum = pgEnum("adj_kind", ["TIE_OUT", "OVERRIDE", "MANUAL"]);
 export const returnMatchEnum = pgEnum("return_match", ["MATCHED", "PENDING_MATCH"]);
+export const pickListStatusEnum = pgEnum("pick_list_status", [
+  "OPEN",
+  "COMPLETED",
+  "CANCELLED",
+]);
+export const pickSourceTypeEnum = pgEnum("pick_source_type", [
+  "ZOHO_SO",
+  "MANUAL_ORDER",
+]);
+export const deliveryStatusEnum = pgEnum("delivery_status", [
+  "PENDING",
+  "PARTIAL",
+  "DELIVERED",
+]);
+export const receivingVarianceEnum = pgEnum("receiving_variance", [
+  "NONE",
+  "S1_FREE_LEFTOVER", // short receipt + vendor leaves the rest free (₹0)
+  "S2_OVER_RECEIPT", // vendor supplied more than ordered
+  "S4_SHORT_BILLED_FULL", // short receipt but billed full — missing qty → wastage
+]);
 
 /* Money/qty helpers */
 const qty = (name: string) => numeric(name, { precision: 14, scale: 3 });
@@ -123,6 +156,8 @@ export const skus = pgTable(
     shelfLifeDays: integer("shelf_life_days"),
     zohoItemId: text("zoho_item_id"),
     source: text("source").notNull().default("LOCAL"), // LOCAL | ZOHO
+    /** false = skips the Receiving Bay (non-graded goods, e.g. cheese) */
+    requiresSorting: boolean("requires_sorting").notNull().default(true),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -236,23 +271,30 @@ export const receivingDoc = pgTable(
     poNo: text("po_no"),
     prNo: text("pr_no"),
     zohoPoId: text("zoho_po_id"),
+    variance: receivingVarianceEnum("variance").notNull().default("NONE"),
+    varianceNote: text("variance_note"),
     ...docHeaderCols(),
   },
   (t) => [uniqueIndex("uq_receiving_token").on(t.clientToken)],
 );
-export const receivingLine = pgTable("receiving_line", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  docId: bigint("doc_id", { mode: "number" })
-    .notNull()
-    .references(() => receivingDoc.id),
-  skuId: bigint("sku_id", { mode: "number" })
-    .notNull()
-    .references(() => skus.id),
-  acceptedQty: qty("accepted_qty").notNull(),
-  poExpectedQty: qty("po_expected_qty"),
-  uom: uomEnum("uom").notNull().default("kg"),
-  notes: text("notes"),
-});
+export const receivingLine = pgTable(
+  "receiving_line",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    docId: bigint("doc_id", { mode: "number" })
+      .notNull()
+      .references(() => receivingDoc.id),
+    skuId: bigint("sku_id", { mode: "number" })
+      .notNull()
+      .references(() => skus.id),
+    acceptedQty: qty("accepted_qty").notNull(),
+    poExpectedQty: qty("po_expected_qty"),
+    uom: uomEnum("uom").notNull().default("kg"),
+    notes: text("notes"),
+  },
+  // cumulative-received SUM per (PO, sku) — see openPurchaseOrdersForReceiving
+  (t) => [index("idx_receiving_line_doc_sku").on(t.docId, t.skuId)],
+);
 
 /* ---- Sorting (A/B/C data; waste auto-computed) ---- */
 export const sortingDoc = pgTable(
@@ -316,10 +358,15 @@ export const assemblyLine = pgTable(
     totalUsed: qty("total_used").notNull(),
     packsMade: numeric("packs_made", { precision: 12, scale: 2 }).notNull(),
     packSizeText: text("pack_size_text"),
+    qtyWaste: qty("qty_waste").notNull().default("0"),
   },
   (t) => [
     check("ck_assembly_used", sql`${t.totalUsed} = ${t.qtyOut} - ${t.qtyIn}`),
     check("ck_assembly_in_le_out", sql`${t.qtyIn} <= ${t.qtyOut}`),
+    check(
+      "ck_assembly_waste",
+      sql`${t.qtyWaste} >= 0 AND ${t.qtyWaste} <= ${t.totalUsed}`,
+    ),
   ],
 );
 
@@ -412,7 +459,7 @@ export const invAdjustmentLine = pgTable("inv_adjustment_line", {
   reason: text("reason"),
 });
 
-/* ---- Dispatch ---- */
+/* ---- Dispatch (shipment + delivery confirmation) ---- */
 export const dispatchDoc = pgTable(
   "dispatch_doc",
   {
@@ -420,19 +467,168 @@ export const dispatchDoc = pgTable(
     customerId: bigint("customer_id", { mode: "number" }),
     channel: channelEnum("channel"),
     dispatchRef: text("dispatch_ref"),
+    pickListId: bigint("pick_list_id", { mode: "number" }).references(
+      (): AnyPgColumn => pickList.id,
+    ),
+    deliveryStatus: deliveryStatusEnum("delivery_status").notNull().default("PENDING"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    deliveredByUserId: bigint("delivered_by_user_id", { mode: "number" }),
+    deliveryNote: text("delivery_note"),
     ...docHeaderCols(),
   },
   (t) => [uniqueIndex("uq_dispatch_token").on(t.clientToken)],
 );
-export const dispatchLine = pgTable("dispatch_line", {
+export const dispatchLine = pgTable(
+  "dispatch_line",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    docId: bigint("doc_id", { mode: "number" })
+      .notNull()
+      .references(() => dispatchDoc.id),
+    packSkuId: bigint("pack_sku_id", { mode: "number" })
+      .notNull()
+      .references(() => skus.id),
+    qty: qty("qty").notNull(),
+    uom: uomEnum("uom").notNull(),
+    deliveredQty: qty("delivered_qty").notNull().default("0"),
+  },
+  (t) => [
+    check(
+      "ck_dispatch_delivered",
+      sql`${t.deliveredQty} >= 0 AND ${t.deliveredQty} <= ${t.qty}`,
+    ),
+  ],
+);
+
+/* =========================================================================
+ * Orders & Pick List (v2)
+ * =======================================================================*/
+
+/** Manually entered customer orders (channels that don't flow through Zoho). */
+export const manualOrderDoc = pgTable(
+  "manual_order_doc",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    customerId: bigint("customer_id", { mode: "number" }),
+    channel: channelEnum("channel"),
+    orderRef: text("order_ref"),
+    ...docHeaderCols(),
+  },
+  (t) => [uniqueIndex("uq_manual_order_token").on(t.clientToken)],
+);
+export const manualOrderLine = pgTable("manual_order_line", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   docId: bigint("doc_id", { mode: "number" })
     .notNull()
-    .references(() => dispatchDoc.id),
-  packSkuId: bigint("pack_sku_id", { mode: "number" })
+    .references(() => manualOrderDoc.id),
+  skuId: bigint("sku_id", { mode: "number" })
     .notNull()
     .references(() => skus.id),
   qty: qty("qty").notNull(),
+  uom: uomEnum("uom").notNull(),
+});
+
+/**
+ * The mandatory Pick List. At most ONE list can be OPEN at a time (partial
+ * unique index). Assembly/Dispatch are gated on: at least one list generated
+ * today AND no list OPEN (see lib/workflow.ts).
+ */
+export const pickList = pgTable(
+  "pick_list",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    businessDate: date("business_date").notNull(),
+    status: pickListStatusEnum("status").notNull().default("OPEN"),
+    note: text("note"),
+    createdByUserId: bigint("created_by_user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    clientToken: text("client_token"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    completedByUserId: bigint("completed_by_user_id", { mode: "number" }),
+    /** Set when completed short (SUPERVISOR+); surfaced on the Summary sheet. */
+    shortCompleteReason: text("short_complete_reason"),
+  },
+  (t) => [
+    uniqueIndex("uq_pick_list_token").on(t.clientToken),
+    // max one OPEN list system-wide
+    uniqueIndex("uq_pick_list_single_open")
+      .on(t.status)
+      .where(sql`${t.status} = 'OPEN'`),
+    index("idx_pick_list_date").on(t.businessDate),
+  ],
+);
+export const pickListLine = pgTable(
+  "pick_list_line",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    pickListId: bigint("pick_list_id", { mode: "number" })
+      .notNull()
+      .references(() => pickList.id),
+    skuId: bigint("sku_id", { mode: "number" })
+      .notNull()
+      .references(() => skus.id),
+    qtyToPick: qty("qty_to_pick").notNull(),
+    qtyPicked: qty("qty_picked").notNull().default("0"),
+    uom: uomEnum("uom").notNull(),
+  },
+  (t) => [
+    unique("uq_pick_list_line").on(t.pickListId, t.skuId),
+    check("ck_pick_picked_nonneg", sql`${t.qtyPicked} >= 0`),
+  ],
+);
+/** Which orders fed a pick list — an order can only ever feed one list. */
+export const pickListSource = pgTable(
+  "pick_list_source",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    pickListId: bigint("pick_list_id", { mode: "number" })
+      .notNull()
+      .references(() => pickList.id),
+    sourceType: pickSourceTypeEnum("source_type").notNull(),
+    zohoSoId: text("zoho_so_id"),
+    manualOrderDocId: bigint("manual_order_doc_id", { mode: "number" }).references(
+      () => manualOrderDoc.id,
+    ),
+  },
+  (t) => [
+    uniqueIndex("uq_pick_source_so").on(t.zohoSoId),
+    uniqueIndex("uq_pick_source_manual").on(t.manualOrderDocId),
+    check(
+      "ck_pick_source_one_ref",
+      sql`(${t.sourceType} = 'ZOHO_SO' AND ${t.zohoSoId} IS NOT NULL AND ${t.manualOrderDocId} IS NULL)
+       OR (${t.sourceType} = 'MANUAL_ORDER' AND ${t.manualOrderDocId} IS NOT NULL AND ${t.zohoSoId} IS NULL)`,
+    ),
+  ],
+);
+
+/* =========================================================================
+ * Local PO drafts (Aniket) — pushed to Zoho as draft Purchase Orders
+ * =======================================================================*/
+export const poDraftDoc = pgTable(
+  "po_draft_doc",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    vendorZohoId: text("vendor_zoho_id"),
+    vendorName: text("vendor_name"),
+    deliveryDate: date("delivery_date"),
+    zohoPoId: text("zoho_po_id"), // set once pushed
+    pushStatus: text("push_status").notNull().default("LOCAL"), // LOCAL | PUSHED
+    ...docHeaderCols(),
+  },
+  (t) => [uniqueIndex("uq_po_draft_token").on(t.clientToken)],
+);
+export const poDraftLine = pgTable("po_draft_line", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  docId: bigint("doc_id", { mode: "number" })
+    .notNull()
+    .references(() => poDraftDoc.id),
+  skuId: bigint("sku_id", { mode: "number" })
+    .notNull()
+    .references(() => skus.id),
+  qty: qty("qty").notNull(),
+  rate: money("rate"),
   uom: uomEnum("uom").notNull(),
 });
 
@@ -492,6 +688,20 @@ export const zohoPoCache = pgTable("zoho_po_cache", {
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+/** Open sales orders (feed the Pick List) — mirrors zoho_po_cache. */
+export const zohoSoCache = pgTable("zoho_so_cache", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  zohoSoId: text("zoho_so_id").notNull().unique(),
+  soNumber: text("so_number"),
+  customerZohoId: text("customer_zoho_id"),
+  customerName: text("customer_name"),
+  soDate: date("so_date"),
+  status: text("status"),
+  lineItems: jsonb("line_items"),
+  lastModifiedTime: text("last_modified_time"),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 export const zohoInvoiceCache = pgTable(
   "zoho_invoice_cache",
   {
@@ -522,12 +732,17 @@ export const syncLog = pgTable("sync_log", {
 });
 
 /* App-level audit (non-stock events: logins, voids, sync, config) */
-export const appAuditLog = pgTable("app_audit_log", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  userId: bigint("user_id", { mode: "number" }),
-  action: text("action").notNull(),
-  docType: text("doc_type"),
-  docId: bigint("doc_id", { mode: "number" }),
-  payload: jsonb("payload"),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+export const appAuditLog = pgTable(
+  "app_audit_log",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: bigint("user_id", { mode: "number" }),
+    action: text("action").notNull(),
+    docType: text("doc_type"),
+    docId: bigint("doc_id", { mode: "number" }),
+    payload: jsonb("payload"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  // Zoho push idempotency + push-status lookups (Review queue)
+  (t) => [index("idx_audit_action_doc").on(t.action, t.docType, t.docId)],
+);

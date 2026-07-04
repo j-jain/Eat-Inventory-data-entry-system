@@ -15,6 +15,13 @@
       "when": 1781797493242,
       "tag": "0001_ledger_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783114994415,
+      "tag": "0002_loving_mystique",
+      "breakpoints": true
     }
   ]
 }

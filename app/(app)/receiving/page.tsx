@@ -1,18 +1,22 @@
 import { PageHeader, Card } from "@/components/PageHeader";
-import { EntryForm } from "@/components/EntryForm";
-import { submitReceivingBatch } from "@/actions/entries";
+import { ReceivingSheet } from "@/components/ReceivingSheet";
+import { requireUser, hasRole } from "@/lib/auth/rbac";
 import { motherSkus, openPurchaseOrdersForReceiving } from "@/lib/queries";
+import { ZOHO_PUSH_LABELS } from "@/lib/zoho/labels";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReceivingPage() {
+  const s = await requireUser();
+  const isManager = hasRole(s.role, "MANAGER");
   const [mothers, pos] = await Promise.all([
     motherSkus(),
     openPurchaseOrdersForReceiving(),
   ]);
-  // Every line of every open ("issued but not received") PO is pre-listed as a
-  // locked row tagged with its PO + vendor; staff only fill Accepted qty. On Save
-  // the rows are grouped back into one receiving doc per PO.
+  // Every line of every open PO is pre-listed as a locked row tagged with its
+  // PO + vendor; staff only fill Accepted qty against the REMAINING quantity
+  // (partial deliveries keep the line here until fully received). Receiving is
+  // PO-only for floor staff — off-PO rows are a manager exception.
   const initialRows = pos.flatMap((po) =>
     po.lines.map((ln) => ({
       __locked: "1",
@@ -23,7 +27,9 @@ export default async function ReceivingPage() {
       skuCode: ln.code ?? "",
       itemName: ln.name,
       uom: ln.uom ?? "",
-      expectedQty: ln.expectedQty,
+      expectedQty: ln.remainingQty,
+      orderedQty: ln.expectedQty,
+      alreadyReceived: ln.alreadyReceivedQty,
       acceptedQty: "",
     })),
   );
@@ -31,14 +37,19 @@ export default async function ReceivingPage() {
     <div>
       <PageHeader
         title="Receiving"
-        subtitle="Every open purchase order is listed below with its vendor, items and expected quantity — just enter the accepted quantity on whatever arrived. Use + Add row for an off-PO receipt."
+        subtitle={
+          isManager
+            ? "Open POs are listed with their remaining quantity — enter what arrived. Off-PO receipts (+ Add row) are a manager-only exception."
+            : "Only items on an open purchase order can be received. Enter the accepted quantity against each remaining line — partial deliveries are fine, the rest stays listed."
+        }
       />
       <Card>
-        <EntryForm
-          kind="receiving"
-          action={submitReceivingBatch}
-          motherSkus={mothers}
+        <ReceivingSheet
+          mothers={mothers}
           initialRows={initialRows.length ? initialRows : undefined}
+          canPushToZoho={isManager}
+          pushLabel={ZOHO_PUSH_LABELS["receiving.receive"]}
+          allowAddRow={isManager}
         />
       </Card>
     </div>

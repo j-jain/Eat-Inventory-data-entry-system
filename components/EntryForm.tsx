@@ -5,8 +5,7 @@ import { useRouter } from "next/navigation";
 import { SearchSelect, type Option } from "@/components/SearchSelect";
 import { newToken } from "@/lib/utils";
 import { D, sumQty } from "@/lib/money";
-import { pushDraftToZoho } from "@/actions/zoho-drafts";
-import type { PushableDocType } from "@/lib/zoho/drafts";
+import { pushDraftToZoho, type PushableDocType } from "@/actions/zoho-drafts";
 
 export type SkuOpt = {
   id: number;
@@ -66,6 +65,23 @@ type Props = {
   initialRows?: Row[];
   reasons?: { code: string; label: string }[];
   channel?: "BULK_FRUIT" | "BLINKIT" | "SPENCERS";
+  /** Render the "Push to Zoho" button after a save (default false). */
+  canPushToZoho?: boolean;
+  /** Neutral caption under the push button: exactly where it lands in Zoho. */
+  pushLabel?: string;
+  /** Show the "+ Add row" button (default true). */
+  allowAddRow?: boolean;
+  /**
+   * Interceptor run at the very start of save. Return `proceed:false` to abort
+   * silently (the interceptor owns its own UX, e.g. a modal), or `patched` rows
+   * to submit those instead of the current rows. Typed loosely — callers pass
+   * their own row shape through.
+   */
+  beforeSubmit?: (
+    rows: unknown[],
+  ) =>
+    | Promise<{ proceed: boolean; patched?: unknown[] }>
+    | { proceed: boolean; patched?: unknown[] };
 };
 
 type Row = Record<string, string>;
@@ -92,6 +108,8 @@ const PUSH_DOCTYPE: Partial<Record<EntryKind, PushableDocType>> = {
 
 export function EntryForm(props: Props) {
   const { kind, action } = props;
+  const allowAddRow = props.allowAddRow ?? true;
+  const showPush = props.canPushToZoho ?? false;
   const router = useRouter();
   const tokenRef = useRef(newToken());
   const [pending, start] = useTransition();
@@ -109,6 +127,13 @@ export function EntryForm(props: Props) {
   );
   const [header, setHeader] = useState<Row>({});
   const [rows, setRows] = useState<Row[]>(seedRows);
+  // Adopt fresh server prelists after a save's router.refresh() (these pages
+  // only refresh on save, so this never clobbers mid-edit typing).
+  const [seenSeed, setSeenSeed] = useState(seedRows);
+  if (seenSeed !== seedRows) {
+    setSeenSeed(seedRows);
+    setRows(seedRows);
+  }
   const [invoiceOpts, setInvoiceOpts] = useState<InvOpt[]>(props.invoices ?? []);
   const [loadingInvoices, setLoadingInvoices] = useState(false);
   // sequence guards so a slow response can't overwrite a newer selection
@@ -203,18 +228,23 @@ export function EntryForm(props: Props) {
     return n(r.actualReceived) - n(r.qtyAsPerBill);
   }
 
-  function buildPayload(): Record<string, unknown> | { error: string } {
+  function buildPayload(
+    srcRows: Row[] = rows,
+  ): Record<string, unknown> | { error: string } {
     const clientToken = tokenRef.current;
     switch (kind) {
       case "receiving": {
         // One sheet can cover several open POs — group filled rows by their PO so
         // the batch action can post one receiving doc per PO. Rows with no PO
-        // (manual + Add row) collapse into a single "" group.
+        // (manual + Add row) collapse into a single "" group. `poExpectedQty` is
+        // the line's REMAINING qty (backend requirement); a per-line `variance`
+        // scenario (JSON on the row, set by the page's beforeSubmit dialog) is
+        // forwarded so the server can apply the S1/S2/S4 rules.
         const groups = new Map<
           string,
           { zohoPoId?: string; poNo?: string; lines: Record<string, unknown>[] }
         >();
-        for (const r of rows) {
+        for (const r of srcRows) {
           if (!r.skuId || !r.acceptedQty) continue;
           const key = r.zohoPoId || "";
           if (!groups.has(key))
@@ -223,11 +253,20 @@ export function EntryForm(props: Props) {
               poNo: r.poNo || undefined,
               lines: [],
             });
+          let variance: unknown;
+          if (r.__variance) {
+            try {
+              variance = JSON.parse(r.__variance);
+            } catch {
+              variance = undefined;
+            }
+          }
           groups.get(key)!.lines.push({
             skuId: Number(r.skuId),
             acceptedQty: r.acceptedQty,
             poExpectedQty: r.expectedQty || undefined,
             uom: skuById.get(Number(r.skuId))?.uom ?? r.uom ?? "kg",
+            ...(variance ? { variance } : {}),
           });
         }
         return {
@@ -241,7 +280,7 @@ export function EntryForm(props: Props) {
         return {
           clientToken,
           isRecheck: false,
-          lines: rows
+          lines: srcRows
             .filter((r) => r.skuId && r.receivedQty)
             .map((r) => ({
               skuId: Number(r.skuId),
@@ -257,7 +296,7 @@ export function EntryForm(props: Props) {
         return {
           clientToken,
           isRecheck: true,
-          lines: rows
+          lines: srcRows
             .filter((r) => r.skuId && r.sortedQty)
             .map((r) => ({
               skuId: Number(r.skuId),
@@ -271,7 +310,7 @@ export function EntryForm(props: Props) {
         return {
           clientToken,
           channel: props.channel,
-          lines: rows
+          lines: srcRows
             .filter((r) => r.motherSkuId && r.packSkuId && r.qtyOut && r.packsMade)
             .map((r) => ({
               motherSkuId: Number(r.motherSkuId),
@@ -282,12 +321,15 @@ export function EntryForm(props: Props) {
               packSizeText: skuById.get(Number(r.packSkuId))?.packSizeText ?? undefined,
               // Bulk Fruit packs in the unit the packer chose; others are pieces.
               uom: props.channel === "BULK_FRUIT" ? r.uom || "box" : "pc",
+              // Optional: part of `used` lost to trim/damage (record-only waste).
+              qtyWaste: r.qtyWaste || "0",
+              ...(r.wasteReason ? { wasteReason: r.wasteReason } : {}),
             })),
         };
       case "wastage":
         return {
           clientToken,
-          lines: rows
+          lines: srcRows
             .filter((r) => r.skuId && r.qty && r.reason)
             .map((r) => ({
               skuId: Number(r.skuId),
@@ -306,7 +348,7 @@ export function EntryForm(props: Props) {
           zohoInvoiceId: header.zohoInvoiceId || undefined,
           invNo: inv?.invoiceNumber || undefined,
           matchStatus: header.zohoInvoiceId ? "MATCHED" : "PENDING_MATCH",
-          lines: rows
+          lines: srcRows
             .filter((r) => r.skuId && r.qtyReturn && r.disposition)
             .map((r) => {
               const sku = skuById.get(Number(r.skuId));
@@ -326,7 +368,7 @@ export function EntryForm(props: Props) {
           clientToken,
           vendorId: header.vendorId ? Number(header.vendorId) : null,
           against: header.against,
-          lines: rows
+          lines: srcRows
             .filter((r) => r.skuId && (r.qtyToAdjust || r.actualReceived || r.qtyAsPerBill))
             .map((r) => ({
               skuId: Number(r.skuId),
@@ -347,7 +389,7 @@ export function EntryForm(props: Props) {
           clientToken,
           customerId: header.customerId ? Number(header.customerId) : null,
           channel: props.channel ?? null,
-          lines: rows
+          lines: srcRows
             .filter((r) => r.skuId && r.qty)
             .map((r) => ({
               packSkuId: Number(r.skuId),
@@ -358,42 +400,51 @@ export function EntryForm(props: Props) {
     }
   }
 
-  function submit() {
-    const payload = buildPayload();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const pAny = payload as any;
-    // receiving groups its lines under `pos`; every other kind uses `lines`
-    const lineCount =
-      kind === "receiving"
-        ? (pAny.pos ?? []).reduce(
-            (a: number, g: { lines: unknown[] }) => a + g.lines.length,
-            0,
-          )
-        : (pAny.lines?.length ?? 0);
-    if (lineCount === 0) {
-      setMsg({ type: "err", text: "Add at least one complete row." });
-      return;
+  async function submit() {
+    setMsg(null);
+    // Interceptor OUTSIDE the transition: it may open a modal (receiving
+    // variances) whose own state updates must render while we wait — awaiting
+    // it inside startTransition would defer the modal's render and deadlock.
+    let effectiveRows: Row[] = rows;
+    if (props.beforeSubmit) {
+      const r = await props.beforeSubmit(rows as unknown[]);
+      if (!r.proceed) return;
+      if (r.patched) effectiveRows = r.patched as Row[];
     }
-    // Grades can't exceed the base qty (mirrors the DB CHECK on sorting_line).
-    if (kind === "sorting" || kind === "regrade") {
-      const bad = rows.some((r) => {
-        const base = wasteBase(r);
-        if (!r.skuId || !base || base.trim() === "") return false;
-        return waste(r) < 0;
-      });
-      if (bad) {
-        setMsg({
-          type: "err",
-          text:
-            kind === "sorting"
-              ? "Grades A+B+C can't exceed the Received quantity."
-              : "Grades A+B+C can't exceed the Sorting quantity.",
-        });
+    start(async () => {
+      const payload = buildPayload(effectiveRows);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pAny = payload as any;
+      // receiving groups its lines under `pos`; every other kind uses `lines`
+      const lineCount =
+        kind === "receiving"
+          ? (pAny.pos ?? []).reduce(
+              (a: number, g: { lines: unknown[] }) => a + g.lines.length,
+              0,
+            )
+          : (pAny.lines?.length ?? 0);
+      if (lineCount === 0) {
+        setMsg({ type: "err", text: "Add at least one complete row." });
         return;
       }
-    }
-    setMsg(null);
-    start(async () => {
+      // Grades can't exceed the base qty (mirrors the DB CHECK on sorting_line).
+      if (kind === "sorting" || kind === "regrade") {
+        const bad = effectiveRows.some((r) => {
+          const base = wasteBase(r);
+          if (!r.skuId || !base || base.trim() === "") return false;
+          return waste(r) < 0;
+        });
+        if (bad) {
+          setMsg({
+            type: "err",
+            text:
+              kind === "sorting"
+                ? "Grades A+B+C can't exceed the Received quantity."
+                : "Grades A+B+C can't exceed the Sorting quantity.",
+          });
+          return;
+        }
+      }
       const res = await action(payload);
       if (res.ok) {
         const count = res.count;
@@ -465,7 +516,66 @@ export function EntryForm(props: Props) {
         onSelectInvoice={selectInvoice}
       />
 
-      <div className="overflow-x-auto rounded-lg border border-neutral-200">
+      {/* phones: one card per row (same fields via the shared cell renderer) */}
+      <div className="space-y-3 md:hidden">
+        {rows.map((r, i) => {
+          const title =
+            r.itemName ||
+            skuById.get(Number(r.skuId || r.packSkuId || 0))?.name ||
+            `Row ${i + 1}`;
+          const sub = [r.poNo, r.vendorName].filter(Boolean).join(" · ");
+          return (
+            <div
+              key={i}
+              className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm"
+            >
+              <div className="mb-2 flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium text-neutral-800">
+                    {title}
+                  </div>
+                  {sub && (
+                    <div className="truncate text-[11px] text-neutral-400">{sub}</div>
+                  )}
+                </div>
+                {!r.__locked && (
+                  <button
+                    type="button"
+                    onClick={() => removeRow(i)}
+                    className="shrink-0 rounded-full px-2 py-0.5 text-neutral-300 hover:text-red-500"
+                    title="remove row"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+                {cols.map((c) => {
+                  const wide =
+                    c.type === "sku-mother" ||
+                    c.type === "sku-pack" ||
+                    c.type === "sku-all" ||
+                    c.type === "select";
+                  return (
+                    <label
+                      key={c.key}
+                      className={`flex flex-col gap-0.5 ${wide ? "col-span-2" : ""}`}
+                    >
+                      <span className="text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+                        {c.label}
+                      </span>
+                      {renderCell(c, r, i)}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* desktop: the classic sheet */}
+      <div className="hidden overflow-x-auto rounded-lg border border-neutral-200 md:block">
         <table className="w-full text-sm">
           <thead className="bg-neutral-50 text-left text-xs uppercase tracking-wide text-neutral-500">
             <tr>
@@ -501,19 +611,22 @@ export function EntryForm(props: Props) {
         </table>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={addRow}
-          className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-50"
-        >
-          + Add row
-        </button>
+      {/* sticky on phones so Save is always a thumb away */}
+      <div className="sticky bottom-16 z-10 -mx-1 flex flex-wrap items-center gap-3 rounded-lg bg-white/95 p-1 backdrop-blur md:static md:bottom-auto md:mx-0 md:bg-transparent md:p-0">
+        {allowAddRow && (
+          <button
+            type="button"
+            onClick={addRow}
+            className="rounded-md border border-neutral-300 px-3 py-2 text-sm hover:bg-neutral-50 md:py-1.5"
+          >
+            + Add row
+          </button>
+        )}
         <button
           type="button"
           onClick={submit}
           disabled={pending}
-          className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          className="rounded-md bg-brand px-5 py-2 text-sm font-semibold text-ink hover:bg-brand-600 disabled:opacity-50 md:py-1.5"
         >
           {pending ? "Saving…" : "Save"}
         </button>
@@ -521,38 +634,45 @@ export function EntryForm(props: Props) {
           <span
             className={
               msg.type === "ok"
-                ? "text-sm font-medium text-emerald-700"
+                ? "text-sm font-medium text-brand-800"
                 : "text-sm font-medium text-red-600"
             }
           >
             {msg.text}
           </span>
         )}
-        {pushDocType && (
-          <button
-            type="button"
-            onClick={pushToZoho}
-            disabled={!lastSaved || pushing}
-            title={
-              lastSaved
-                ? "Create a draft of the saved document in Zoho"
-                : "Save the document first, then push it to Zoho"
-            }
-            className="rounded-md border border-sky-300 bg-sky-50 px-4 py-1.5 text-sm font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-40"
-          >
-            {pushing ? "Pushing…" : "Push draft to Zoho"}
-          </button>
-        )}
-        {pushMsg && (
-          <span
-            className={
-              pushMsg.type === "ok"
-                ? "text-sm font-medium text-sky-700"
-                : "text-sm font-medium text-red-600"
-            }
-          >
-            {pushMsg.text}
-          </span>
+        {showPush && pushDocType && (
+          <div className="flex flex-col gap-0.5">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={pushToZoho}
+                disabled={!lastSaved || pushing}
+                title={
+                  lastSaved
+                    ? "Push the saved document to Zoho"
+                    : "Save the document first, then push it to Zoho"
+                }
+                className="rounded-md border border-sky-300 bg-sky-50 px-4 py-1.5 text-sm font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-40"
+              >
+                {pushing ? "Pushing…" : "Push to Zoho"}
+              </button>
+              {pushMsg && (
+                <span
+                  className={
+                    pushMsg.type === "ok"
+                      ? "text-sm font-medium text-sky-700"
+                      : "text-sm font-medium text-red-600"
+                  }
+                >
+                  {pushMsg.text}
+                </span>
+              )}
+            </div>
+            {props.pushLabel && (
+              <span className="text-xs text-neutral-400">{props.pushLabel}</span>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -578,6 +698,21 @@ export function EntryForm(props: Props) {
       const sku = r[c.skuKey ?? "skuId"]
         ? skuById.get(Number(r[c.skuKey ?? "skuId"]))
         : undefined;
+      // Receiving "Remaining" column: show the remaining qty, and (when the row
+      // carries alreadyReceived metadata) a muted hint of the original order.
+      if (c.key === "expectedQty" && r.alreadyReceived != null) {
+        return (
+          <div className="space-y-0.5">
+            <span className="font-mono text-xs text-neutral-600">
+              {r.expectedQty || "—"}
+            </span>
+            <span className="block text-[11px] text-neutral-400">
+              of {r.orderedQty ?? r.expectedQty} ordered · {r.alreadyReceived}{" "}
+              received
+            </span>
+          </div>
+        );
+      }
       let text = "";
       let mono = false;
       switch (c.key) {
@@ -592,7 +727,8 @@ export function EntryForm(props: Props) {
           text = sku?.uom ?? r.uom ?? "";
           break;
         case "packSize":
-          text = sku?.packSizeText ?? r.packSize ?? "";
+          // row value first — assembly seeds "50 g · need 12" style hints
+          text = r.packSize ?? sku?.packSizeText ?? "";
           break;
         case "expectedQty":
           text = r.expectedQty ?? "";
@@ -633,13 +769,14 @@ export function EntryForm(props: Props) {
           inputMode="decimal"
           value={r[c.key] ?? ""}
           onChange={(e) => setCell(i, c.key, e.target.value)}
-          className="w-24 rounded border border-neutral-300 px-2 py-1 text-right text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+          // text-base on phones stops iOS auto-zoom; compact text-sm on desktop
+          className="w-full rounded border border-neutral-300 px-2 py-1.5 text-right text-base focus:outline-none focus:ring-2 focus:ring-brand-600 md:w-24 md:py-1 md:text-sm"
         />
       );
     }
     if (c.type === "select") {
       const opts =
-        c.key === "reason"
+        c.key === "reason" || c.key === "wasteReason"
           ? (props.reasons ?? []).map((x) => ({ value: x.code, label: x.label }))
           : (c.options ?? []);
       return (
@@ -743,7 +880,7 @@ function columnsFor(kind: EntryKind, channel?: string): ColDef[] {
         { key: "skuId", label: "Item (mother SKU)", type: "sku-mother" },
         { key: "skuCode", label: "SKU", type: "display" },
         { key: "uom", label: "UOM", type: "display" },
-        { key: "expectedQty", label: "Expected", type: "display" },
+        { key: "expectedQty", label: "Remaining", type: "display" },
         { key: "acceptedQty", label: "Accepted qty", type: "qty" },
       ];
     case "sorting":
@@ -782,6 +919,8 @@ function columnsFor(kind: EntryKind, channel?: string): ColDef[] {
           { key: "used", label: "Used (auto)", type: "computed" },
           { key: "packsMade", label: "Quantity", type: "qty" },
           { key: "uom", label: "UOM", type: "select", options: UOM_OPTS },
+          { key: "qtyWaste", label: "Waste (kg)", type: "qty" },
+          { key: "wasteReason", label: "Waste reason", type: "select" },
         ];
       return [
         { key: "packSkuId", label: "Pack made", type: "sku-pack" },
@@ -792,6 +931,8 @@ function columnsFor(kind: EntryKind, channel?: string): ColDef[] {
         { key: "qtyIn", label: "Back to CR (kg)", type: "qty" },
         { key: "used", label: "Used (auto)", type: "computed" },
         { key: "packsMade", label: "Packs made", type: "qty" },
+        { key: "qtyWaste", label: "Waste (kg)", type: "qty" },
+        { key: "wasteReason", label: "Waste reason", type: "select" },
       ];
     case "wastage":
       return [
@@ -933,7 +1074,7 @@ function TextField({
       <input
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
-        className="w-36 rounded border border-neutral-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+        className="w-36 rounded border border-neutral-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-600"
       />
     </div>
   );

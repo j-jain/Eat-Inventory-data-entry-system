@@ -1,7 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { stockBalance, stockLedger, skus, locations } from "@/lib/db/schema";
-import { qtyStr } from "@/lib/money";
+import { add, qtyStr } from "@/lib/money";
 
 /** Current cached balance for a (sku, location). Returns "0.000" if none. */
 export async function currentBalance(
@@ -90,6 +90,63 @@ export async function reconcile() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const out: any[] = (rows as any).rows ?? (rows as any) ?? [];
   return out;
+}
+
+export type CombinedStockRow = {
+  skuId: number;
+  code: string;
+  name: string;
+  uom: string;
+  zohoQty: string;
+  unpushedDelta: string;
+  combinedQty: string;
+};
+
+/**
+ * Aniket's complete picture: Zoho stock-on-hand (as of the last Items sync)
+ * plus every LOCAL movement whose document hasn't been pushed to Zoho yet.
+ * "Pushed" = any ZOHO_PUSH success audit row for the doc (legacy v1 rows
+ * count). OPENING docs are excluded — they were seeded FROM Zoho.
+ * One grouped query; the NOT EXISTS probe rides idx_audit_action_doc.
+ */
+export async function combinedZohoStock(): Promise<CombinedStockRow[]> {
+  const res = await db.execute(sql`
+    SELECT k.id AS sku_id, k.code, k.name, k.uom,
+           COALESCE(z.stock_on_hand, 0) AS zoho_qty,
+           COALESCE(d.delta, 0) AS unpushed_delta
+    FROM skus k
+    LEFT JOIN zoho_item_cache z ON z.zoho_item_id = k.zoho_item_id
+    LEFT JOIN (
+      SELECT l.sku_id, SUM(l.qty_signed) AS delta
+      FROM stock_ledger l
+      WHERE l.doc_type <> 'OPENING'
+        AND NOT EXISTS (
+          SELECT 1 FROM app_audit_log a
+          WHERE a.doc_type = l.doc_type::text
+            AND a.doc_id = l.doc_id
+            AND (a.action LIKE 'ZOHO_PUSH:%' OR a.action = 'ZOHO_DRAFT_CREATED')
+        )
+      GROUP BY l.sku_id
+    ) d ON d.sku_id = k.id
+    WHERE k.is_active = true
+      AND (COALESCE(z.stock_on_hand, 0) <> 0 OR COALESCE(d.delta, 0) <> 0)
+    ORDER BY k.code
+  `);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows: any[] = (res as any).rows ?? (res as any) ?? [];
+  return rows.map((r) => {
+    const zoho = String(r.zoho_qty ?? "0");
+    const delta = String(r.unpushed_delta ?? "0");
+    return {
+      skuId: Number(r.sku_id),
+      code: String(r.code),
+      name: String(r.name),
+      uom: String(r.uom),
+      zohoQty: qtyStr(zoho),
+      unpushedDelta: qtyStr(delta),
+      combinedQty: qtyStr(add(zoho, delta)),
+    };
+  });
 }
 
 /** Grade-composition report (informational): A/B/C totals from sorting events. */

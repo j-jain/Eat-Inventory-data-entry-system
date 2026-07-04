@@ -6,6 +6,7 @@ import {
   syncVendors,
   syncCustomers,
   syncPurchaseOrders,
+  syncSalesOrders,
 } from "@/lib/zoho/sync";
 
 export const dynamic = "force-dynamic";
@@ -25,11 +26,12 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "zoho not configured" }, { status: 503 });
   }
 
-  const jobs: { entity: "ITEM" | "VENDOR" | "CUSTOMER" | "PO"; fn: (since?: Date) => Promise<number> }[] = [
+  const jobs: { entity: "ITEM" | "VENDOR" | "CUSTOMER" | "PO" | "SO"; fn: (since?: Date) => Promise<number> }[] = [
     { entity: "ITEM", fn: syncItems },
     { entity: "VENDOR", fn: syncVendors },
     { entity: "CUSTOMER", fn: syncCustomers },
     { entity: "PO", fn: syncPurchaseOrders },
+    { entity: "SO", fn: syncSalesOrders },
   ];
 
   const results: Record<string, number | string> = {};

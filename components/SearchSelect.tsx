@@ -133,7 +133,7 @@ export function SearchSelect({
         onClick={() => setOpen((v) => !v)}
         className={cn(
           "flex w-full items-center justify-between gap-2 rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-left text-sm",
-          "focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:bg-neutral-100 disabled:text-neutral-400",
+          "focus:outline-none focus:ring-2 focus:ring-brand-600 disabled:bg-neutral-100 disabled:text-neutral-400",
         )}
       >
         <span className={cn("truncate", !selected && "text-neutral-400")}>
@@ -170,7 +170,7 @@ export function SearchSelect({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Type to filter…"
-                className="w-full rounded border border-neutral-300 px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                className="w-full rounded border border-neutral-300 px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-brand-600"
               />
             </div>
             {selected && (
@@ -199,8 +199,8 @@ export function SearchSelect({
                   setQuery("");
                 }}
                 className={cn(
-                  "block w-full px-3 py-1.5 text-left text-sm hover:bg-emerald-50",
-                  o.value === value && "bg-emerald-50 font-medium",
+                  "block w-full px-3 py-1.5 text-left text-sm hover:bg-cream",
+                  o.value === value && "bg-cream font-medium",
                 )}
               >
                 {o.code && (

@@ -1,8 +1,10 @@
 import { PageHeader, Card } from "@/components/PageHeader";
 import { EntryForm } from "@/components/EntryForm";
 import { submitWastage } from "@/actions/entries";
-import { allActiveSkus, recentWastage } from "@/lib/queries";
+import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { allActiveSkus, recentWastage, wastageBySource } from "@/lib/queries";
 import { WASTAGE_REASONS } from "@/lib/constants";
+import { ZOHO_PUSH_LABELS } from "@/lib/zoho/labels";
 
 export const dynamic = "force-dynamic";
 
@@ -14,21 +16,54 @@ const SOURCE_LABEL: Record<string, string> = {
   RETURN_WASTE: "Return",
 };
 
+const STAGE_LABEL: Record<string, string> = {
+  RECEIVING: "Receiving",
+  SORTING: "Sorting & Grading",
+  REGRADE: "Regrading",
+  ASSEMBLY: "Assembly",
+  RETURN: "Returns",
+  EXPIRY: "Expiry",
+  GENERAL: "General",
+};
+
 export default async function WastagePage() {
-  const [all, waste] = await Promise.all([allActiveSkus(), recentWastage()]);
+  const s = await requireUser();
+  const [all, waste, bySource] = await Promise.all([
+    allActiveSkus(),
+    recentWastage(),
+    wastageBySource(30),
+  ]);
   return (
     <div className="space-y-6">
       <div>
         <PageHeader
           title="Wastage"
-          subtitle="Record waste against any item with a reason. Reduces stock (hard-blocked below zero)."
+          subtitle="Waste is tracked at every stage of the workflow — the cards show where the last 30 days' waste came from. Manual entries reduce stock (hard-blocked below zero)."
         />
+        {bySource.length > 0 && (
+          <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+            {bySource.map((c) => (
+              <div
+                key={c.source}
+                className="rounded-lg border border-neutral-200 bg-white px-3 py-2 shadow-sm"
+              >
+                <div className="text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+                  {STAGE_LABEL[c.source] ?? c.source}
+                </div>
+                <div className="font-mono text-lg text-red-600">{c.totalQty}</div>
+                <div className="text-[11px] text-neutral-400">{c.entries} entr{c.entries === 1 ? "y" : "ies"}</div>
+              </div>
+            ))}
+          </div>
+        )}
         <Card>
           <EntryForm
             kind="wastage"
             action={submitWastage}
             allSkus={all}
             reasons={WASTAGE_REASONS.map((r) => ({ code: r.code, label: r.label }))}
+            canPushToZoho={hasRole(s.role, "MANAGER")}
+            pushLabel={ZOHO_PUSH_LABELS["wastage.adj"]}
           />
         </Card>
       </div>

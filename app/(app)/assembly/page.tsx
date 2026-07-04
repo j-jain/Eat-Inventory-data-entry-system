@@ -1,39 +1,63 @@
 import { PageHeader, Card } from "@/components/PageHeader";
 import { AssemblyTabs } from "@/components/AssemblyTabs";
-import { motherSkus, packSkusByChannel, type SkuOption } from "@/lib/queries";
-import { SHEET_SKUS } from "@/scripts/sheet-skus";
-import { normalizeCode } from "@/lib/sku";
+import { WorkflowLock } from "@/components/WorkflowLock";
+import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { motherSkus, packSkusByChannel, currentPickList } from "@/lib/queries";
+import { pickListGate, istToday } from "@/lib/workflow";
+import { ZOHO_PUSH_LABELS } from "@/lib/zoho/labels";
+import { WASTAGE_REASONS } from "@/lib/constants";
 
 export const dynamic = "force-dynamic";
 
-// The operational Excel pack list (sheet-skus) — only these are pre-listed; any
-// other channel SKU stays reachable via "+ Add row".
-const SHEET_CODES = new Set(SHEET_SKUS.map((s) => normalizeCode(s.code)));
-const onSheet = (list: SkuOption[]) =>
-  list.filter((s) => SHEET_CODES.has(normalizeCode(s.code)));
-
 export default async function AssemblyPage() {
-  const [mothers, bz, s, bf] = await Promise.all([
+  const s = await requireUser();
+  const isManager = hasRole(s.role, "MANAGER");
+  const gate = await pickListGate();
+
+  if (gate.state !== "COMPLETED") {
+    return (
+      <div>
+        <PageHeader
+          title="DC Assembly"
+          subtitle="Convert raw (mother) stock into finished packs — after the Pick List is done."
+        />
+        <WorkflowLock gate={gate} stage="Assembly" />
+      </div>
+    );
+  }
+
+  const [mothers, bz, sp, bf, list] = await Promise.all([
     motherSkus(),
     packSkusByChannel("BLINKIT"),
     packSkusByChannel("SPENCERS"),
     packSkusByChannel("BULK_FRUIT"),
+    currentPickList(istToday()),
   ]);
+
+  // Assembly is pick-list-driven: only today's picked packs are pre-listed.
+  // (Requirement: no assembling products that weren't picked.) Managers may
+  // still add off-list rows as an audited exception.
+  const pickLines = (list?.lines ?? []).map((l) => ({
+    skuId: l.skuId,
+    need: l.qtyPicked !== "0.000" ? l.qtyPicked : l.qtyToPick,
+    code: l.code,
+  }));
+
   return (
     <div>
       <PageHeader
         title="DC Assembly"
-        subtitle="Every pack from the assembly sheet is listed with its size and mother. Fill Out / Back / Quantity only on what you assembled; blank rows are ignored. Need an off-sheet item? Use + Add row."
+        subtitle="Today's pick list drives this sheet — each picked pack is listed with how many are needed. Enter Out / Back / Quantity made; Used is automatic."
       />
       <Card>
         <AssemblyTabs
           motherSkus={mothers}
-          packsByChannel={{ BLINKIT: bz, SPENCERS: s, BULK_FRUIT: bf }}
-          prelistByChannel={{
-            BLINKIT: onSheet(bz),
-            SPENCERS: onSheet(s),
-            BULK_FRUIT: onSheet(bf),
-          }}
+          packsByChannel={{ BLINKIT: bz, SPENCERS: sp, BULK_FRUIT: bf }}
+          pickLines={pickLines}
+          allowAddRow={isManager}
+          canPushToZoho={isManager}
+          pushLabel={ZOHO_PUSH_LABELS["assembly.bundle"]}
+          wasteReasons={WASTAGE_REASONS.map((r) => ({ code: r.code, label: r.label }))}
         />
       </Card>
     </div>

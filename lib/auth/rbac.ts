@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { getSession, type Session, type Role } from "./session";
 
-const ORDER: Record<Role, number> = { FLOOR: 0, SUPERVISOR: 1, ADMIN: 2 };
+const ORDER: Record<Role, number> = { FLOOR: 0, SUPERVISOR: 1, MANAGER: 2, ADMIN: 3 };
 
 /** Require a logged-in user; redirect to /login otherwise. */
 export async function requireUser(): Promise<Session> {
@@ -20,6 +20,8 @@ export async function requireRole(min: Role): Promise<Session> {
 }
 
 export const requireSupervisor = () => requireRole("SUPERVISOR");
+/** MANAGER = Aniket: Zoho pushes, PO screens, review queue, combined stock. */
+export const requireManager = () => requireRole("MANAGER");
 export const requireAdmin = () => requireRole("ADMIN");
 
 export function hasRole(role: Role, min: Role): boolean {

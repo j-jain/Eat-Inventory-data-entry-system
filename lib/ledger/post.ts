@@ -6,7 +6,7 @@ import {
   uomEnum,
   docTypeEnum,
 } from "@/lib/db/schema";
-import { add, lt, sub, qtyStr } from "@/lib/money";
+import { add, lt, neg, qtyStr, sub } from "@/lib/money";
 
 export type Uom = (typeof uomEnum.enumValues)[number];
 export type MovementType = (typeof movementTypeEnum.enumValues)[number];
@@ -176,7 +176,8 @@ export async function voidDocumentLedger(
       {
         skuId: src.skuId,
         locationId: src.locationId,
-        qtySigned: qtyStr(add("0", `-${src.qtySigned}`)),
+        // decimal negation — string-prefixing "-" breaks on negative rows
+        qtySigned: qtyStr(neg(src.qtySigned)),
         uom: src.uom,
         movementType: "VOID_REVERSAL",
         reversesLedgerId: src.id,

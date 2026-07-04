@@ -10,6 +10,7 @@ import { sql } from "drizzle-orm";
 
 const SEED_USERS = [
   { fullName: "Admin", role: "ADMIN" as const, pin: "1234" },
+  { fullName: "Aniket", role: "MANAGER" as const, pin: "2222" },
   { fullName: "Supervisor", role: "SUPERVISOR" as const, pin: "1111" },
   { fullName: "Ramesh (Floor)", role: "FLOOR" as const, pin: "0000" },
 ];

@@ -4,6 +4,8 @@ import { db } from "@/lib/db";
 import { stockLedger, skus, users, locations } from "@/lib/db/schema";
 import { getSession } from "@/lib/auth/session";
 import { gradeComposition } from "@/lib/ledger/balance";
+import { dailySummary } from "@/lib/queries";
+import { istToday } from "@/lib/workflow";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +43,54 @@ export async function GET(
       ...rows.map((r: any) => [r.code, r.name, r.grade_a, r.grade_b, r.grade_c, r.waste]),
     ]);
     name = "grade-composition";
+  } else if (sheet === "summary") {
+    // one sectioned CSV mirroring the on-screen Summary Sheets
+    const date = req.nextUrl.searchParams.get("date") || istToday();
+    const d = await dailySummary(date);
+    out = csv([
+      [`EAT daily summary — ${date}`],
+      [],
+      ["RECEIVING"],
+      ["sku", "item", "vendor", "accepted", "remaining_was", "scenario"],
+      ...d.receiving.map((r) => [r.code, r.name, r.vendor, r.accepted, r.expected, r.variance]),
+      [],
+      ["SORTING"],
+      ["sku", "item", "grade_a", "grade_b", "grade_c", "waste"],
+      ...d.sorting.map((r) => [r.code, r.name, r.a, r.b, r.c, r.waste]),
+      [],
+      ["ASSEMBLY"],
+      ["channel", "pack_sku", "pack", "used_kg", "packs_made", "kg_per_pack", "waste"],
+      ...d.assembly.map((r) => [
+        r.channel,
+        r.packCode,
+        r.packName,
+        r.used,
+        r.packs,
+        r.yieldPerPack,
+        r.waste,
+      ]),
+      [],
+      ["WASTAGE BY STAGE"],
+      ["stage", "sku", "item", "qty", "reason"],
+      ...d.wastage.map((r) => [r.source, r.code, r.name, r.qty, r.reason]),
+      [],
+      ["DISPATCH & DELIVERY"],
+      ["customer", "channel", "sku", "item", "dispatched", "delivered", "status"],
+      ...d.dispatch.map((r) => [
+        r.customer,
+        r.channel,
+        r.code,
+        r.name,
+        r.qty,
+        r.delivered,
+        r.status,
+      ]),
+      [],
+      ["PICK LIST EXCEPTIONS (completed short)"],
+      ["list_id", "reason", "completed_by"],
+      ...d.pickListExceptions.map((r) => [r.id, r.reason, r.completedBy]),
+    ]);
+    name = `summary-${date}`;
   } else {
     // default: full immutable ledger (the universal audit export)
     const conds = [];

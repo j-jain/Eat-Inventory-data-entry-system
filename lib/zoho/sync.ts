@@ -5,6 +5,7 @@ import {
   zohoVendorCache,
   zohoCustomerCache,
   zohoPoCache,
+  zohoSoCache,
   syncLog,
   skus,
 } from "@/lib/db/schema";
@@ -190,6 +191,92 @@ function isOpenPO(p: PO): boolean {
     return false;
   if (rs === "received") return false;
   return true;
+}
+
+type SO = {
+  salesorder_id: string;
+  salesorder_number?: string;
+  customer_id?: string;
+  customer_name?: string;
+  date?: string;
+  status?: string;
+  order_status?: string;
+  invoiced_status?: string;
+  shipped_status?: string;
+  last_modified_time?: string;
+};
+
+/**
+ * An SO feeds the Pick List only while it still needs fulfilment. Zoho's SO
+ * status vocabulary varies by module version, so exclusion is defensive:
+ * anything drafted/void/closed/fully-shipped drops out.
+ */
+function isOpenSO(so: SO): boolean {
+  const s = (so.status || "").toLowerCase();
+  const os = (so.order_status || "").toLowerCase();
+  const CLOSED = ["draft", "void", "closed", "cancelled", "canceled", "onhold", "on_hold"];
+  if (CLOSED.includes(s) || CLOSED.includes(os)) return false;
+  if ((so.shipped_status || "").toLowerCase() === "shipped") return false;
+  if (s === "fulfilled" || os === "fulfilled") return false;
+  return true;
+}
+
+/**
+ * Sales Orders — LEAN, mirrors the PO sync: only OPEN (to-be-fulfilled) SOs are
+ * cached; they are the Zoho source of the Pick List. Closed/shipped SOs in the
+ * window are deleted from cache so completed orders drop out of picking.
+ */
+export function syncSalesOrders(since?: Date) {
+  return runSync("SO", async () => {
+    const summaries = await zohoPaged<SO>(
+      `${zohoConfig.inventoryBase}/salesorders`,
+      "salesorders",
+      { sort_column: "date", sort_order: "D", ...sinceParam(since) },
+      10,
+    );
+    const closed = summaries.filter((so) => !isOpenSO(so));
+    for (const so of closed) {
+      await db
+        .delete(zohoSoCache)
+        .where(eq(zohoSoCache.zohoSoId, String(so.salesorder_id)));
+    }
+    const open = summaries.filter(isOpenSO);
+    for (const so of open) {
+      let lineItems: unknown = null;
+      try {
+        const detail = await zohoGet<{ salesorder?: { line_items?: unknown } }>(
+          `${zohoConfig.inventoryBase}/salesorders/${so.salesorder_id}`,
+        );
+        lineItems = detail.salesorder?.line_items ?? null;
+      } catch {
+        /* keep summary even if detail fails */
+      }
+      await db
+        .insert(zohoSoCache)
+        .values({
+          zohoSoId: String(so.salesorder_id),
+          soNumber: so.salesorder_number,
+          customerZohoId: so.customer_id,
+          customerName: so.customer_name,
+          soDate: so.date ?? null,
+          status: so.status,
+          lineItems,
+          lastModifiedTime: so.last_modified_time,
+        })
+        .onConflictDoUpdate({
+          target: zohoSoCache.zohoSoId,
+          set: {
+            soNumber: so.salesorder_number,
+            customerName: so.customer_name,
+            status: so.status,
+            lineItems,
+            lastModifiedTime: so.last_modified_time,
+            fetchedAt: new Date(),
+          },
+        });
+    }
+    return open.length;
+  });
 }
 
 /**

@@ -62,7 +62,7 @@ export function ResetPanel() {
           <span
             className={
               msg.type === "ok"
-                ? "text-sm font-medium text-emerald-700"
+                ? "text-sm font-medium text-brand-800"
                 : "text-sm font-medium text-red-600"
             }
           >

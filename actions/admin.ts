@@ -12,6 +12,7 @@ import {
   syncVendors,
   syncCustomers,
   syncPurchaseOrders,
+  syncSalesOrders,
 } from "@/lib/zoho/sync";
 
 /** Transactional tables wiped by a reset (mirrors scripts/reset.ts). */
@@ -30,8 +31,15 @@ const TX_TABLES = [
   "return_doc",
   "inv_adjustment_line",
   "inv_adjustment_doc",
+  "pick_list_source",
+  "pick_list_line",
   "dispatch_line",
   "dispatch_doc",
+  "pick_list",
+  "manual_order_line",
+  "manual_order_doc",
+  "po_draft_line",
+  "po_draft_doc",
   "opening_doc",
 ];
 
@@ -45,6 +53,7 @@ const ZOHO_CACHE_TABLES = [
   "zoho_vendor_cache",
   "zoho_customer_cache",
   "zoho_po_cache",
+  "zoho_so_cache",
   "zoho_invoice_cache",
   "sync_log",
 ];
@@ -88,7 +97,7 @@ export async function resetOperationalData(confirm: string): Promise<ResetResult
     let zohoError: string | undefined;
     if (zohoConfig.enabled) {
       zoho = "done";
-      for (const fn of [syncItems, syncVendors, syncCustomers, syncPurchaseOrders]) {
+      for (const fn of [syncItems, syncVendors, syncCustomers, syncPurchaseOrders, syncSalesOrders]) {
         try {
           pulled += await fn();
         } catch (e) {

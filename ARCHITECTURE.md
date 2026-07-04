@@ -34,20 +34,28 @@ This app replaces all 7 sheets with **one web app**:
 | Zoho integration | Plain `fetch` (no SDK) | Zoho Inventory + Zoho Books REST APIs |
 | Tests | `vitest` | Ledger unit tests (over-draw, void, reconcile, append-only) |
 
-## 3. Data flow (the operational pipeline)
+## 3. Data flow (the operational pipeline — v2, structurally enforced)
 
 ```
-Zoho PO ──▶ Receiving ──▶ Sorting (A/B/C; waste auto = received − A − B − C) ──▶ Cold Room stock
-                                                                       │
-                                        DC Assembly (Blinkit / Spencer's / Bulk Fruit)
-                                              Used = Out − In  (consumes mother, produces packs)
-                                                                       │
-                                        Finished Goods ──▶ Dispatch (not yet built) ──▶ Returns (match Zoho invoice)
+Zoho PO ──▶ Receiving (PO-only; variance S1/S2/S4) ──▶ RECEIVING_BAY
+                                                            │ sorting is the ONLY path onward
+        Sorting (A/B/C; waste auto) ─ SORT_OUT/SORT_IN ──▶ COLD_ROOM ◀── Regrade (in place)
+                                                            │
+Zoho SO + manual orders ──▶ Pick List (MANDATORY gate) ──▶ DC Assembly (pick-list-driven)
+                                                            │
+                     Finished Goods ──▶ Dispatch (pick-list-driven) ──▶ Delivery confirm ──▶ Returns
 
-   Wastage (hub — records waste from anywhere)      Inventory Adjustment (PO/bill tie-out + manual ± + supervisor override)
+   Wastage (hub — every stage tags its source)      Inventory Adjustment (PO/bill tie-out + manual ± + supervisor override)
 ```
 
-- **Two locations only**: `COLD_ROOM` (raw/mother stock) and `DC_FLOOR_FG` (finished packs).
+- **Three locations**: `RECEIVING_BAY` (received-unsorted — structurally unusable downstream; SKUs
+  with `requires_sorting=false` skip it), `COLD_ROOM` (sorted raw/mother), `DC_FLOOR_FG` (packs).
+- **Workflow enforcement**: the bay makes receive-before-sort physical; Assembly & Dispatch
+  additionally require today's Pick List generated AND completed (`lib/workflow.ts:
+  assertPickListComplete`, checked inside the server actions — no role bypass; the only audited
+  escape is a SUPERVISOR short-complete with a recorded reason that surfaces on /summary).
+- Receiving is **PO-only** for floor staff (off-PO = MANAGER); accepted > remaining is rejected
+  unless S2 is chosen; S1/S4 auto-create their adjustment/wastage paper trail in-transaction.
 - **Stock = total qty per SKU per location.** Grades A/B/C are recorded as *data* on the sorting line, not as separate stock buckets, in v1.
 - **`stock_ledger`** (append-only) is the single source of truth. **`stock_balance`** is a mutable cache, always updated in the same DB transaction as the ledger insert, and guarded by a `qty >= 0` CHECK constraint.
 - Every out-movement is **hard-blocked** below zero via `SELECT ... FOR UPDATE` inside a transaction (`lib/ledger/post.ts`); only an ADMIN adjustment can force it negative-to-zero-correcting (`allowNegative`).
@@ -236,16 +244,58 @@ Run with `npx tsx scripts/<name>.ts`. Also see the `npm run db:*` aliases in §1
 
 ## 12. Auth & roles
 
-Three roles, strictly ordered: **FLOOR < SUPERVISOR < ADMIN**.
+Four roles, strictly ordered: **FLOOR < SUPERVISOR < MANAGER < ADMIN**. MANAGER is
+Aniket's role: every Zoho push button (nobody else even sees them), PO create/edit
+screens, the `/review` push queue, the combined Zoho+local stock view, and off-PO
+receipts — without ADMIN's reset/SKU-master/negative-override powers.
 
 - Login is name + 4-digit PIN (no email/password) — `bcryptjs` hash + `PIN_PEPPER`, 5 wrong attempts → 60s lockout.
 - Session is a `jose`-signed JWT in an httpOnly cookie, 12h expiry (~one shift).
 - `requireUser()` gates every page/action; `requireSupervisor()`/`requireAdmin()` gate voids, adjustments, SKU admin, Zoho sync, and reset.
 - ADMIN is the only role that can post an adjustment that pushes a balance below zero (`allowNegative`).
 
-## 13. What's deliberately not built yet (v1 scope)
+## 13. v2 additions (July 2026) — quick map
 
-- **Dispatch** — schema and action exist, UI is a placeholder.
-- **Writing to Zoho** beyond the single "push draft" button — only `INV_ADJUSTMENT` has a wired draft builder; Receiving/Assembly/Wastage/Return throw `NotMappedError` until their Zoho field mapping is specified.
-- **Grade-based stock** — A/B/C are recorded as data on the sorting line, not tracked as separate stock balances.
-- **PWA/offline queue** — the app relies on idempotency tokens to survive weak wifi, not true offline support.
+- **Receiving Bay + `requires_sorting`** — receipts land in `RECEIVING_BAY`; sorting transfers
+  (`SORT_OUT`/`SORT_IN`, waste stays explicit as `SORT_WASTE` from the bay).
+- **Partial POs** — `openPurchaseOrdersForReceiving` SUMs cumulative accepted per (PO, SKU);
+  lines stay on the sheet with `remainingQty` until fully received; voids restore remaining.
+- **Variance scenarios** — S1 free-leftover (extra ₹0 receipt line + record-only TIE_OUT
+  adjustment linked via `against='RECEIVING:<id>'`), S2 over-receipt, S4 short-billed-full
+  (receipt = bill qty + auto wastage `source=RECEIVING` back-linked via `source_doc_*`).
+  Cascade void: voiding a receiving/assembly doc voids its auto-created companions first.
+- **Orders & Pick List** — `zoho_so_cache` (lean open-SO sync, `syncSalesOrders`), manual
+  orders (`manual_order_*`), `pick_list`/`_line`/`_source` (max ONE OPEN list via partial
+  unique index; an order feeds exactly one non-cancelled list). Gate rule: ≥1 list generated
+  today (IST) AND none open. Empty generation auto-completes ("no orders" satisfies the mandate).
+- **Dispatch & Delivery** — dispatch pre-lists the completed pick list; `markDelivered` sets
+  per-line delivered qty + PENDING/PARTIAL/DELIVERED header status (no stock movement).
+- **Zoho writes** — `lib/zoho/write-guard.ts` is now a REGISTRY (`assertZohoWrite`: method +
+  path-pattern allowlist, sole PUT = `purchaseorders/{id}`); `zohoWrite` in write.ts; builders
+  in `lib/zoho/drafts.ts` (purchase receive, bill, bundle-per-line with composite pre-flight,
+  wastage/adjustment → inventory adjustments, PO draft create); `pushToZoho` (MANAGER-only,
+  per-request idempotent via `ZOHO_PUSH:<kind>:<subKey>` audit rows, failures audited);
+  `/review` queue + "Push all pending"; PO screens (`/purchase-orders/new`, `[id]/edit` → live
+  PUT + single-PO cache refresh); `combinedZohoStock` (Zoho + unpushed local Δ).
+  Labels in `lib/zoho/labels.ts` (client-safe) state exactly where each push lands.
+- **Sync cadence** — `.github/workflows/zoho-sync.yml` pings `/api/cron/sync` at 08:30, 12:00,
+  13:00, 15:00, 17:00, 19:00 IST (Vercel daily cron stays as baseline). SO sync included.
+- **UI v2** — EAT brand tokens (`--color-brand #BFDA3D`, cream, ink) in globals.css; desktop
+  sidebar + mobile bottom-tab nav (`components/MobileNav.tsx`, shared `nav-links.ts` with
+  role-gated groups); EntryForm renders cards below `md` (same ColDef/renderCell), sticky Save,
+  16px inputs; PWA manifest + icons; `/summary` daily sheets (+ `sheet=summary` CSV).
+- **Tests** — `tests/workflow.test.ts` runs the REAL server actions against in-memory PGlite
+  (mocked session/next-cache): bay flow, PO-only, variance, gate, dispatch/delivery, cascade
+  void, reconciliation. (Also fixed a v1 bug: voiding docs with negative ledger rows crashed
+  on `"-" + qty` double-negation — now `neg()`.)
+
+## 14. Still deliberately out of scope
+
+- **Alerts** on Aniket's dashboard (owner: later version).
+- **Grade-based stock** — A/B/C remain line data, not separate balances.
+- **Offline queue** — idempotency tokens only; PWA is install + app-shell, no service-worker sync.
+- **RETURN push to Zoho** — returns are recorded locally; credit-note mapping unspecified.
+- Zoho staging checks before enabling pushes in prod: S1 PO PUT below received qty on a
+  throwaway PO; pack SKUs exist as composite items; re-provision the token with the new write
+  scopes (`purchaseorders.CREATE/UPDATE`, `purchasereceives.CREATE`, `salesorders.READ`,
+  `compositeitems.ALL`, Books `bills.CREATE`) via `scripts/zoho-exchange.ts`.

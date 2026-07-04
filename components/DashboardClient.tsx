@@ -50,34 +50,65 @@ export function DashboardClient({ initial }: { initial: LiveStockRow[] }) {
       )
     : rows;
 
+  const bay = filtered.filter((r) => r.locationCode === "RECEIVING_BAY");
   const cold = filtered.filter((r) => r.locationCode === "COLD_ROOM");
   const fg = filtered.filter((r) => r.locationCode === "DC_FLOOR_FG");
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Filter by code, name or channel…"
-          className="w-72 rounded-md border border-neutral-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-brand-600 sm:w-72 sm:py-1.5 sm:text-sm"
         />
         <span className="text-xs text-neutral-400">
           live · {filtered.length} rows · updated {at || "…"}
         </span>
       </div>
 
+      {bay.length > 0 && (
+        <StockTable
+          title="Receiving Bay (waiting to be sorted)"
+          rows={bay}
+          highlight
+        />
+      )}
       <StockTable title="Cold Room (raw mother stock)" rows={cold} />
       <StockTable title="Finished Goods (packs)" rows={fg} />
     </div>
   );
 }
 
-function StockTable({ title, rows }: { title: string; rows: LiveStockRow[] }) {
+function StockTable({
+  title,
+  rows,
+  highlight,
+}: {
+  title: string;
+  rows: LiveStockRow[];
+  highlight?: boolean;
+}) {
   return (
-    <div className="rounded-xl border border-neutral-200 bg-white shadow-sm">
-      <div className="border-b border-neutral-100 px-4 py-2.5 text-sm font-semibold text-neutral-700">
-        {title} <span className="font-normal text-neutral-400">· {rows.length}</span>
+    <div
+      className={`overflow-x-auto rounded-xl border bg-white shadow-sm ${
+        highlight ? "border-amber-300" : "border-neutral-200"
+      }`}
+    >
+      <div
+        className={`border-b px-4 py-2.5 text-sm font-semibold ${
+          highlight
+            ? "border-amber-200 bg-amber-50 text-amber-900"
+            : "border-neutral-100 text-neutral-700"
+        }`}
+      >
+        {title} <span className="font-normal opacity-60">· {rows.length}</span>
+        {highlight && (
+          <span className="ml-2 text-xs font-normal">
+            — sort these to move them into the Cold Room
+          </span>
+        )}
       </div>
       <table className="w-full text-sm">
         <thead className="text-left text-xs uppercase tracking-wide text-neutral-400">
@@ -102,7 +133,7 @@ function StockTable({ title, rows }: { title: string; rows: LiveStockRow[] }) {
               <td className="px-4 py-1.5">
                 <Link
                   href={`/dashboard/sku/${r.skuId}`}
-                  className="font-mono text-xs text-emerald-700 hover:underline"
+                  className="font-mono text-xs text-brand-800 hover:underline"
                 >
                   {r.code}
                 </Link>

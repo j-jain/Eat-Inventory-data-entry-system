@@ -8,6 +8,7 @@ const ENTITIES: { key: SyncEntity; label: string }[] = [
   { key: "vendors", label: "Vendors" },
   { key: "customers", label: "Customers" },
   { key: "pos", label: "Open POs" },
+  { key: "sos", label: "Open Sales Orders" },
   { key: "all", label: "Everything" },
 ];
 
@@ -53,7 +54,7 @@ export function SyncPanel({ enabled }: { enabled: boolean }) {
         ))}
       </div>
       {msg && (
-        <p className={msg.type === "ok" ? "text-sm text-emerald-700" : "text-sm text-red-600"}>
+        <p className={msg.type === "ok" ? "text-sm text-brand-800" : "text-sm text-red-600"}>
           {msg.text}
         </p>
       )}
