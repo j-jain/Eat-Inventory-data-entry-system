@@ -1,14 +1,14 @@
 import { PageHeader } from "@/components/PageHeader";
 import { WorkflowLock } from "@/components/WorkflowLock";
 import { DispatchForm, DeliveryList } from "@/components/DispatchClient";
-import { requireUser } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { pickListGate, istToday } from "@/lib/workflow";
 import { customers, dispatchPrelist, todaysDispatches } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function DispatchPage() {
-  await requireUser();
+  await requirePageAccess("/dispatch");
   const gate = await pickListGate();
   const date = istToday();
 

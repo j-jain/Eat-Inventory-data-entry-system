@@ -15,7 +15,10 @@ import {
   syncSalesOrders,
 } from "@/lib/zoho/sync";
 
-/** Transactional tables wiped by a reset (mirrors scripts/reset.ts). */
+/** Transactional tables wiped by a reset (mirrors scripts/reset.ts).
+ *  Order matters: children before parents (FKs). Deliberately DELETE, never
+ *  TRUNCATE — the ledger's append-only guard is a BEFORE DELETE row trigger
+ *  and TRUNCATE would silently bypass it. */
 const TX_TABLES = [
   "stock_ledger",
   "stock_balance",
@@ -31,6 +34,7 @@ const TX_TABLES = [
   "return_doc",
   "inv_adjustment_line",
   "inv_adjustment_doc",
+  "pick_list_line_source",
   "pick_list_source",
   "pick_list_line",
   "dispatch_line",
@@ -41,6 +45,10 @@ const TX_TABLES = [
   "po_draft_line",
   "po_draft_doc",
   "opening_doc",
+  // v3 state — stale push records would mark NEW docs as already-pushed
+  "zoho_push",
+  "system_log",
+  "zoho_call_counter",
 ];
 
 /**
@@ -84,6 +92,9 @@ export async function resetOperationalData(confirm: string): Promise<ResetResult
         await tx.execute(sql.raw(`DELETE FROM ${t}`));
       }
       await tx.execute(sql`ALTER TABLE stock_ledger ENABLE TRIGGER trg_ledger_no_delete`);
+      // Scoped audit wipe: ZOHO_% rows carried push state until v3 and would
+      // go stale; LOGIN / RESET / USER_* history is deliberately preserved.
+      await tx.execute(sql`DELETE FROM app_audit_log WHERE action LIKE 'ZOHO_%'`);
       await tx.insert(appAuditLog).values({
         userId: s.uid,
         action: "RESET",

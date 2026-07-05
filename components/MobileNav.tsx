@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { NAV_LINKS, navVisible, type NavRole } from "@/components/nav-links";
+import { NAV_LINKS, navVisiblePages } from "@/components/nav-links";
 
 /** Bottom tab bar (phones): the 4 everyday stations + a More sheet. */
 const TABS: { href: string; label: string; icon: string }[] = [
@@ -14,10 +14,11 @@ const TABS: { href: string; label: string; icon: string }[] = [
   { href: "/assembly", label: "Pack", icon: "📦" },
 ];
 
-export function MobileNav({ role }: { role: NavRole }) {
+export function MobileNav({ allowed }: { allowed: string[] }) {
   const path = usePathname();
   const [open, setOpen] = useState(false);
-  const links = NAV_LINKS.filter((l) => navVisible(l, role));
+  const links = NAV_LINKS.filter((l) => navVisiblePages(l, allowed));
+  const tabs = TABS.filter((t) => allowed.includes(t.href));
 
   return (
     <>
@@ -64,7 +65,7 @@ export function MobileNav({ role }: { role: NavRole }) {
       )}
 
       <nav className="fixed inset-x-0 bottom-0 z-50 flex h-16 items-stretch border-t border-neutral-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden">
-        {TABS.map((t) => {
+        {tabs.map((t) => {
           const active = path === t.href || path.startsWith(t.href + "/");
           return (
             <Link

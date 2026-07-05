@@ -46,8 +46,25 @@ export function NewPoEditor({ vendors, skus }: { vendors: Vendor[]; skus: Sku[] 
 
   function save(thenPush: boolean) {
     setMsg(null);
-    const filled = lines.filter((l) => l.skuId && Number(l.qty) > 0);
+    // Only Zoho-acceptable values can leave this form: vendor from the synced
+    // vendor list, items from Zoho-linked SKUs, qty > 0, rate ≥ 0, delivery
+    // date not in the past. Anything else is rejected before any request.
     if (!vendorZohoId) return setMsg({ type: "err", text: "Pick a vendor first." });
+    const touched = lines.filter((l) => l.skuId || l.qty.trim() !== "" || l.rate.trim() !== "");
+    const invalid = touched.find(
+      (l) =>
+        !l.skuId ||
+        !(Number(l.qty) > 0) ||
+        (l.rate.trim() !== "" && !(Number(l.rate) >= 0)),
+    );
+    if (invalid)
+      return setMsg({
+        type: "err",
+        text: "Every line needs an item and a quantity above 0 (rate, if given, can't be negative).",
+      });
+    if (deliveryDate && deliveryDate < new Date().toISOString().slice(0, 10))
+      return setMsg({ type: "err", text: "Delivery date can't be in the past." });
+    const filled = touched;
     if (!filled.length) return setMsg({ type: "err", text: "Add at least one line." });
     start(async () => {
       const res = await savePoDraft({
@@ -99,6 +116,7 @@ export function NewPoEditor({ vendors, skus }: { vendors: Vendor[]; skus: Sku[] 
           <input
             type="date"
             value={deliveryDate}
+            min={new Date().toISOString().slice(0, 10)}
             onChange={(e) => setDeliveryDate(e.target.value)}
             className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-600"
           />

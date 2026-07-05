@@ -1,12 +1,13 @@
 import { PageHeader } from "@/components/PageHeader";
 import { OrdersClient } from "@/components/OrdersClient";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { customers, allActiveSkus, recentManualOrders } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function OrdersPage() {
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/orders");
   const [custs, skus, orders] = await Promise.all([
     customers(),
     allActiveSkus(),

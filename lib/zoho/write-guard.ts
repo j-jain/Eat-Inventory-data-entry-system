@@ -92,13 +92,3 @@ export function assertZohoWrite(method: string, path: string): ZohoWriteEntry {
   }
   return entry as ZohoWriteEntry;
 }
-
-/** @deprecated v1 shim — POST-only path check; prefer zohoWrite + registry. */
-export function assertDraftCreate(method: string, path: string): void {
-  if (method.toUpperCase() !== "POST") {
-    throw new Error(
-      `Zoho write is CREATE-ONLY here: ${method} is blocked. Use zohoWrite for the PO edit.`,
-    );
-  }
-  assertZohoWrite("POST", path);
-}

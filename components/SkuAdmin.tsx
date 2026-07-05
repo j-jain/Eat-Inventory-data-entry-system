@@ -12,6 +12,7 @@ type SkuRow = {
   packSizeText: string | null;
   skuKind: string;
   isActive: boolean;
+  zohoItemId: string | null;
 };
 
 export function SkuAdmin({ skus }: { skus: SkuRow[] }) {
@@ -106,7 +107,12 @@ export function SkuAdmin({ skus }: { skus: SkuRow[] }) {
               <th className="px-4 py-2 font-medium">Name</th>
               <th className="px-4 py-2 font-medium">Channel</th>
               <th className="px-4 py-2 font-medium">Pack</th>
-              <th className="px-4 py-2 font-medium">Active</th>
+              <th className="px-4 py-2 font-medium" title="Appears in entry dropdowns">
+                Active
+              </th>
+              <th className="px-4 py-2 font-medium" title="Matched to a Zoho item by the Items sync">
+                Zoho
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -123,12 +129,33 @@ export function SkuAdmin({ skus }: { skus: SkuRow[] }) {
                     onChange={(e) => toggle(r.id, e.target.checked)}
                   />
                 </td>
+                <td className="px-4 py-1.5">
+                  {r.zohoItemId ? (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-brand/20 px-2 py-0.5 text-[11px] font-medium text-brand-800"
+                      title={`Linked to Zoho item ${r.zohoItemId}`}
+                    >
+                      ● linked
+                    </span>
+                  ) : (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] text-neutral-400"
+                      title="Not matched to any Zoho item yet — run Items sync, or check the SKU spelling in Zoho"
+                    >
+                      ○ not linked
+                    </span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-neutral-400">Showing {Math.min(filtered.length, 400)} of {filtered.length}.</p>
+      <p className="text-xs text-neutral-400">
+        Showing {Math.min(filtered.length, 400)} of {filtered.length}. <b>Active</b> = appears in
+        entry dropdowns (the checkbox you tick/untick). <b>Zoho</b> = whether the Items sync matched
+        this SKU to a Zoho item — pushes need it.
+      </p>
     </div>
   );
 }

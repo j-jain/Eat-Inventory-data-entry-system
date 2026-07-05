@@ -20,15 +20,72 @@ import type { ZohoPushKind } from "./labels";
 import { D, qtyStr, sub } from "@/lib/money";
 
 /** One HTTP write to perform. `subKey` makes multi-request pushes (bundles)
- *  individually idempotent in the audit log. */
+ *  individually idempotent in zoho_push. `idemRef` is the reference stamped
+ *  into the payload so an ambiguous outcome can be reconciled by searching
+ *  Zoho for it. The response contract (`responseKey`/`idKeys`/`numberKeys`)
+ *  replaces the old scan-anything id heuristic. */
 export type PushRequest = {
   subKey: string; // "doc" for single-request pushes, "line:<id>" for bundles
   method: "POST" | "PUT";
   url: string;
   body: unknown;
   summary: string; // human line for the Review queue / audit payload
+  /** Idempotency reference embedded in the payload (reference_number or notes). */
+  idemRef: string;
+  /** Wrapper object key in Zoho's create response, e.g. "bill". */
+  responseKey: string;
+  /** Id fields to try inside the wrapper, in order. */
+  idKeys: string[];
+  /** Human document-number fields to try inside the wrapper, in order. */
+  numberKeys: string[];
 };
 export type PushPlan = { kind: ZohoPushKind; requests: PushRequest[] };
+
+/** Pull the Zoho id / human number out of a create response via the request's
+ *  declared contract. Falls back to scanning the wrapper for any `*_id` only
+ *  if the declared keys miss (response-shape drift shouldn't lose the id). */
+export function extractByContract(
+  req: Pick<PushRequest, "responseKey" | "idKeys" | "numberKeys">,
+  res: Record<string, unknown>,
+): { zohoId: string; zohoNumber?: string } {
+  const wrapper = res[req.responseKey];
+  const rec =
+    wrapper && typeof wrapper === "object" && !Array.isArray(wrapper)
+      ? (wrapper as Record<string, unknown>)
+      : firstObjectValue(res);
+  if (!rec) return { zohoId: "" };
+  let zohoId = "";
+  for (const k of req.idKeys) {
+    if (rec[k] != null) {
+      zohoId = String(rec[k]);
+      break;
+    }
+  }
+  if (!zohoId) {
+    for (const [k, v] of Object.entries(rec)) {
+      if (k.endsWith("_id") && (typeof v === "string" || typeof v === "number")) {
+        zohoId = String(v);
+        break;
+      }
+    }
+  }
+  let zohoNumber: string | undefined;
+  for (const k of req.numberKeys) {
+    if (rec[k] != null) {
+      zohoNumber = String(rec[k]);
+      break;
+    }
+  }
+  return { zohoId, zohoNumber };
+}
+
+function firstObjectValue(res: Record<string, unknown>): Record<string, unknown> | null {
+  for (const [k, v] of Object.entries(res)) {
+    if (k === "code" || k === "message") continue;
+    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
+  }
+  return null;
+}
 
 export class NotMappedError extends Error {
   constructor(what: string) {
@@ -96,6 +153,9 @@ async function buildPurchaseReceive(docId: number): Promise<PushPlan> {
   }
   if (!items.length) throw new Error("No billable lines to receive.");
 
+  // Purchase receives have no reference_number field — the idem token leads
+  // the notes instead; the reconciler scans this PO's receives for it.
+  const idemRef = `EAT-RCV-${doc.id}`;
   return {
     kind: "receiving.receive",
     requests: [
@@ -106,9 +166,13 @@ async function buildPurchaseReceive(docId: number): Promise<PushPlan> {
         body: {
           date: doc.businessDate,
           line_items: items,
-          notes: `EAT receiving #${doc.id}${doc.varianceNote ? ` — ${doc.varianceNote}` : ""}`,
+          notes: `${idemRef} — EAT receiving #${doc.id}${doc.varianceNote ? ` — ${doc.varianceNote}` : ""}`,
         },
         summary: `Receive ${items.length} line(s) against PO ${doc.poNo ?? doc.zohoPoId}`,
+        idemRef,
+        responseKey: "purchasereceive",
+        idKeys: ["purchasereceive_id", "receive_id"],
+        numberKeys: ["receive_number"],
       },
     ],
   };
@@ -156,6 +220,7 @@ async function buildBill(docId: number): Promise<PushPlan> {
   });
   if (!line_items.length) throw new Error("No billable lines for this receiving.");
 
+  const idemRef = `EAT-RCV-${doc.id}`;
   return {
     kind: "receiving.bill",
     requests: [
@@ -167,11 +232,15 @@ async function buildBill(docId: number): Promise<PushPlan> {
           vendor_id: vendorId,
           date: doc.businessDate,
           purchaseorder_ids: [doc.zohoPoId],
-          reference_number: `EAT-RCV-${doc.id}`,
+          reference_number: idemRef,
           line_items,
           notes: doc.varianceNote ?? undefined,
         },
         summary: `Bill ${line_items.length} line(s) to ${po?.vendorName ?? "vendor"} for PO ${doc.poNo ?? doc.zohoPoId}`,
+        idemRef,
+        responseKey: "bill",
+        idKeys: ["bill_id"],
+        numberKeys: ["bill_number"],
       },
     ],
   };
@@ -180,6 +249,7 @@ async function buildBill(docId: number): Promise<PushPlan> {
 /** Shared: wastage/adjustment docs → Zoho Inventory Adjustment (live). */
 function adjustmentRequest(args: {
   kind: "wastage.adj" | "adjustment.adj";
+  idemRef: string;
   date: string;
   reason: string;
   description?: string;
@@ -197,6 +267,7 @@ function adjustmentRequest(args: {
           date: args.date,
           reason: args.reason.slice(0, 50) || "EAT adjustment",
           description: args.description,
+          reference_number: args.idemRef,
           adjustment_type: "quantity",
           line_items: args.lines.map((l) => ({
             item_id: l.item_id,
@@ -205,6 +276,10 @@ function adjustmentRequest(args: {
           })),
         },
         summary: args.summary,
+        idemRef: args.idemRef,
+        responseKey: "inventory_adjustment",
+        idKeys: ["inventory_adjustment_id"],
+        numberKeys: ["reference_number"],
       },
     ],
   };
@@ -233,6 +308,7 @@ async function buildWastageAdjustment(docId: number): Promise<PushPlan> {
     );
   return adjustmentRequest({
     kind: "wastage.adj",
+    idemRef: `EAT-WST-${doc.id}`,
     date: String(doc.businessDate),
     reason: `EAT wastage (${usable[0].source})`,
     description: doc.note ?? undefined,
@@ -270,6 +346,7 @@ async function buildInventoryAdjustment(docId: number): Promise<PushPlan> {
     );
   return adjustmentRequest({
     kind: "adjustment.adj",
+    idemRef: `EAT-ADJ-${doc.id}`,
     date: String(doc.businessDate),
     reason: doc.against || "EAT inventory adjustment",
     description: doc.note ?? undefined,
@@ -330,6 +407,8 @@ async function buildBundles(docId: number): Promise<PushPlan> {
     }
 
     const consumed = qtyStr(sub(l.totalUsed, l.qtyWaste));
+    // Per-line reference so each bundle sub-push reconciles independently.
+    const idemRef = `EAT-ASM-${doc.id}-L${l.id}`;
     requests.push({
       subKey: `line:${l.id}`,
       method: "POST",
@@ -338,12 +417,17 @@ async function buildBundles(docId: number): Promise<PushPlan> {
         composite_item_id: l.packZohoItemId,
         date: doc.businessDate,
         quantity_to_bundle: Number(l.packsMade),
+        reference_number: idemRef,
         line_items: [
           { item_id: m.zohoItemId, quantity_consumed: Number(consumed) },
         ],
         is_completed: true,
       },
       summary: `Bundle ${l.packsMade} × ${l.packCode} (consume ${consumed} of ${m.code})`,
+      idemRef,
+      responseKey: "bundle",
+      idKeys: ["bundle_id"],
+      numberKeys: ["bundle_number", "reference_number"],
     });
   }
   return { kind: "assembly.bundle", requests };
@@ -371,6 +455,7 @@ async function buildPoDraftCreate(docId: number): Promise<PushPlan> {
   if (missing.length)
     throw new Error(`Not linked to Zoho items yet (run Items sync): ${missing.join(", ")}`);
 
+  const idemRef = `EAT-PO-${doc.id}`;
   return {
     kind: "podraft.create",
     requests: [
@@ -382,7 +467,7 @@ async function buildPoDraftCreate(docId: number): Promise<PushPlan> {
           vendor_id: doc.vendorZohoId,
           date: doc.businessDate,
           ...(doc.deliveryDate ? { delivery_date: doc.deliveryDate } : {}),
-          reference_number: `EAT-PO-${doc.id}`,
+          reference_number: idemRef,
           line_items: lines.map((l) => ({
             item_id: l.zohoItemId!,
             quantity: Number(l.qty),
@@ -390,6 +475,10 @@ async function buildPoDraftCreate(docId: number): Promise<PushPlan> {
           })),
         },
         summary: `Draft PO for ${doc.vendorName ?? doc.vendorZohoId} (${lines.length} line(s))`,
+        idemRef,
+        responseKey: "purchaseorder",
+        idKeys: ["purchaseorder_id"],
+        numberKeys: ["purchaseorder_number"],
       },
     ],
   };

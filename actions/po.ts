@@ -1,14 +1,25 @@
 "use server";
 
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/lib/db";
-import { poDraftDoc, poDraftLine, appAuditLog, zohoPoCache } from "@/lib/db/schema";
+import {
+  poDraftDoc,
+  poDraftLine,
+  appAuditLog,
+  receivingDoc,
+  receivingLine,
+  skus,
+  zohoPoCache,
+  zohoPush,
+} from "@/lib/db/schema";
 import type { Tx } from "@/lib/ledger/post";
 import { requireManager } from "@/lib/auth/rbac";
 import { istToday } from "@/lib/workflow";
-import { qtyStr } from "@/lib/money";
+import { qtyStr, D } from "@/lib/money";
+import { normalizeCode } from "@/lib/sku";
+import { logSystem } from "@/lib/log";
 import { zohoConfig } from "@/lib/zoho/config";
 import { zohoGet } from "@/lib/zoho/client";
 import { zohoWrite } from "@/lib/zoho/write";
@@ -215,5 +226,145 @@ export async function updateZohoPo(
     return { ok: true, docId: 0, zohoPoId: p.zohoPoId };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * "Receive X and cancel the remainder": trim a live Zoho PO's lines down to
+ * the quantities actually received, so Zoho marks it fully received and
+ * closes it. Aniket then places a fresh PO for the cancelled part separately
+ * (his stated workflow).
+ *
+ * Sequencing and guards (validated):
+ *  - every POSTED receipt for the PO must have variance NONE (S1/S4 receipts
+ *    change what Zoho should bill — the close-to math would corrupt the PO);
+ *  - every receipt must be pushed (SUCCESS) — Zoho must already know the
+ *    received quantities, since a PO line can't go below its received qty;
+ *  - lines with some receipt → quantity = PO-cumulative received (exact sum);
+ *  - lines never received → REMOVED from the PO (that's the cancellation);
+ *  - refuses when nothing was received (just cancel the PO in Zoho instead).
+ */
+export async function closePoRemainder(zohoPoId: string): Promise<PoActionResult> {
+  const s = await requireManager();
+  if (!zohoConfig.enabled) return { ok: false, error: "Zoho is not configured." };
+  try {
+    const [po] = await db.select().from(zohoPoCache).where(eq(zohoPoCache.zohoPoId, zohoPoId));
+    if (!po) return { ok: false, error: "PO not found in the local cache — run POs sync." };
+
+    const docs = await db
+      .select({ id: receivingDoc.id, variance: receivingDoc.variance })
+      .from(receivingDoc)
+      .where(
+        and(
+          eq(receivingDoc.zohoPoId, zohoPoId),
+          eq(receivingDoc.docStatus, "POSTED"),
+          isNotNull(receivingDoc.zohoPoId),
+        ),
+      );
+    if (!docs.length) return { ok: false, error: "Nothing has been received against this PO." };
+    const varianced = docs.find((d) => d.variance !== "NONE");
+    if (varianced)
+      return {
+        ok: false,
+        error: `Receipt #${varianced.id} has variance ${varianced.variance} — close the remainder manually in Zoho.`,
+      };
+    const pushes = await db
+      .select({ docId: zohoPush.docId, status: zohoPush.status })
+      .from(zohoPush)
+      .where(and(eq(zohoPush.docType, "RECEIVING"), eq(zohoPush.kind, "receiving.receive")));
+    const unpushed = docs.find(
+      (d) => pushes.find((p) => p.docId === d.id)?.status !== "SUCCESS",
+    );
+    if (unpushed)
+      return {
+        ok: false,
+        error: `Receipt #${unpushed.id} hasn't been pushed to Zoho yet — push it first, then close the remainder.`,
+      };
+
+    // cumulative received per local sku, then mapped onto PO lines via sku text
+    const recLines = await db
+      .select({
+        skuId: receivingLine.skuId,
+        code: skus.code,
+        qty: receivingLine.acceptedQty,
+      })
+      .from(receivingLine)
+      .innerJoin(receivingDoc, eq(receivingDoc.id, receivingLine.docId))
+      .innerJoin(skus, eq(skus.id, receivingLine.skuId))
+      .where(and(eq(receivingDoc.zohoPoId, zohoPoId), eq(receivingDoc.docStatus, "POSTED")));
+    const receivedByNorm = new Map<string, ReturnType<typeof D>>();
+    for (const l of recLines) {
+      const k = normalizeCode(l.code);
+      receivedByNorm.set(k, (receivedByNorm.get(k) ?? D(0)).plus(D(l.qty)));
+    }
+
+    const raw = Array.isArray(po.lineItems) ? (po.lineItems as Record<string, unknown>[]) : [];
+    if (!raw.length) return { ok: false, error: "Zoho PO has no cached lines — run POs sync." };
+    const keep: { line_item_id: string; item_id: string; quantity: number; rate?: number }[] = [];
+    const before: { line_item_id: string; quantity: unknown }[] = [];
+    const dropped: string[] = [];
+    for (const li of raw) {
+      const lineItemId = String(li.line_item_id ?? "");
+      before.push({ line_item_id: lineItemId, quantity: li.quantity });
+      const norm = li.sku ? normalizeCode(String(li.sku)) : "";
+      const got = norm ? (receivedByNorm.get(norm) ?? D(0)) : D(0);
+      if (got.gt(0)) {
+        keep.push({
+          line_item_id: lineItemId,
+          item_id: String(li.item_id ?? ""),
+          quantity: Number(got.toFixed(3)),
+          ...(li.rate != null ? { rate: Number(li.rate) } : {}),
+        });
+      } else {
+        dropped.push(String(li.sku ?? li.name ?? lineItemId));
+      }
+    }
+    if (!keep.length)
+      return {
+        ok: false,
+        error: "No PO line has a received quantity — cancel the whole PO in Zoho instead.",
+      };
+
+    await zohoWrite("PUT", `${zohoConfig.inventoryBase}/purchaseorders/${zohoPoId}`, {
+      line_items: keep,
+    });
+
+    await db.insert(appAuditLog).values({
+      userId: s.uid,
+      action: `ZOHO_PUSH:po.update:${zohoPoId}`,
+      docType: "PURCHASE_ORDER",
+      docId: 0,
+      payload: {
+        zohoPoId,
+        mode: "close_remainder",
+        before,
+        after: keep.map((l) => ({ line_item_id: l.line_item_id, quantity: l.quantity })),
+        droppedLines: dropped,
+      },
+    });
+
+    // refresh the cache row so the workspace/receiving sheet reflect it now
+    const after = await zohoGet<{ purchaseorder?: { line_items?: unknown[]; status?: string } }>(
+      `${zohoConfig.inventoryBase}/purchaseorders/${zohoPoId}`,
+    );
+    if (after.purchaseorder) {
+      await db
+        .update(zohoPoCache)
+        .set({
+          lineItems: after.purchaseorder.line_items ?? null,
+          status: after.purchaseorder.status ?? po.status,
+          fetchedAt: new Date(),
+        })
+        .where(eq(zohoPoCache.zohoPoId, zohoPoId));
+    }
+
+    revalidatePath("/review");
+    revalidatePath("/purchase-orders");
+    revalidatePath("/receiving");
+    return { ok: true, docId: 0, zohoPoId };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    await logSystem("ERROR", "po.closePoRemainder", error, { zohoPoId }, undefined);
+    return { ok: false, error };
   }
 }

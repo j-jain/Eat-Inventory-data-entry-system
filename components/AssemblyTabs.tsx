@@ -96,6 +96,7 @@ export function AssemblyTabs({
         canPushToZoho={canPushToZoho}
         pushLabel={pushLabel}
         reasons={wasteReasons}
+        searchable="Search pack size or item…"
       />
     </div>
   );

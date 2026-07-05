@@ -2,10 +2,12 @@ import { PageHeader, Card } from "@/components/PageHeader";
 import { EntryForm } from "@/components/EntryForm";
 import { submitSorting } from "@/actions/entries";
 import { motherSkus, receivedPendingSort } from "@/lib/queries";
+import { requirePageAccess } from "@/lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
 export default async function SortingPage() {
+  await requirePageAccess("/sorting");
   const [mothers, pending] = await Promise.all([motherSkus(), receivedPendingSort()]);
   // Every received-but-not-yet-sorted item is pre-loaded (locked) for grading.
   // The full received batch is graded, so waste = Received − (A+B+C).

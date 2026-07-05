@@ -34,8 +34,9 @@ yarn-error.log*
 .env*
 !.env.example
 
-# local PGlite dev database
+# local PGlite dev databases (incl. the isolated preview instance)
 /.pglite-data
+/.pglite-*
 
 # internal project wiki (Obsidian vault) — kept local, NOT published to the public repo
 /Inventory data log/

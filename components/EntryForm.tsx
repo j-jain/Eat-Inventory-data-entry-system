@@ -71,6 +71,13 @@ type Props = {
   pushLabel?: string;
   /** Show the "+ Add row" button (default true). */
   allowAddRow?: boolean;
+  /** Render a search box that filters the VISIBLE rows (typed values are
+   *  kept — filtering never drops state). Value = placeholder text. */
+  searchable?: string;
+  /** When a SKU is picked, prefill `field` (if empty) with the current stock
+   *  for that SKU and show it as a caption under the qty input. Used by
+   *  Regrade: "Sorting quantity" starts at what's actually there. */
+  stockPrefill?: { field: string; stock: Record<string, string>; unit?: string };
   /**
    * Interceptor run at the very start of save. Return `proceed:false` to abort
    * silently (the interceptor owns its own UX, e.g. a modal), or `patched` rows
@@ -97,13 +104,14 @@ function skuOpts(list: SkuOpt[] = []): Option[] {
   }));
 }
 
-/** Tabs that can push their saved document to Zoho as a draft. */
+/** Tabs that can push their saved document to Zoho as a draft.
+ *  RETURN is deliberately absent — no Zoho mapping is wired for returns yet,
+ *  so the button would only ever fail after the click. */
 const PUSH_DOCTYPE: Partial<Record<EntryKind, PushableDocType>> = {
   receiving: "RECEIVING",
   assembly: "ASSEMBLY",
   adjustment: "INV_ADJUSTMENT",
   wastage: "WASTAGE",
-  return: "RETURN",
 };
 
 export function EntryForm(props: Props) {
@@ -208,6 +216,20 @@ export function EntryForm(props: Props) {
   function removeRow(i: number) {
     setRows((rs) => (rs.length > 1 ? rs.filter((_, idx) => idx !== i) : [{}]));
   }
+
+  // ----- row search (render filter only — typed values always survive) -----
+  const [query, setQuery] = useState("");
+  const visibleRows = useMemo(() => {
+    const indexed = rows.map((r, i) => ({ r, i }));
+    const t = query.trim().toLowerCase();
+    if (!props.searchable || !t) return indexed;
+    return indexed.filter(({ r }) => {
+      const sku = skuById.get(Number(r.skuId || r.packSkuId || 0));
+      return [r.itemName, r.skuCode, r.poNo, r.vendorName, r.packSize, sku?.name, sku?.code]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(t));
+    });
+  }, [rows, query, props.searchable, skuById]);
 
   // ----- computed values per kind -----
   // Sorting grades the full received batch, so waste is measured against the
@@ -516,9 +538,25 @@ export function EntryForm(props: Props) {
         onSelectInvoice={selectInvoice}
       />
 
+      {props.searchable && (
+        <div className="sticky top-14 z-20 -mx-1 rounded-lg bg-white/95 p-1 backdrop-blur md:static md:mx-0 md:bg-transparent md:p-0">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={props.searchable}
+            className="w-full rounded-md border border-neutral-300 px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-brand-600 md:max-w-sm md:py-1.5 md:text-sm"
+          />
+          {query.trim() !== "" && (
+            <p className="mt-1 px-1 text-xs text-neutral-400">
+              Showing {visibleRows.length} of {rows.length} rows — typed values on hidden rows are kept.
+            </p>
+          )}
+        </div>
+      )}
+
       {/* phones: one card per row (same fields via the shared cell renderer) */}
       <div className="space-y-3 md:hidden">
-        {rows.map((r, i) => {
+        {visibleRows.map(({ r, i }) => {
           const title =
             r.itemName ||
             skuById.get(Number(r.skuId || r.packSkuId || 0))?.name ||
@@ -588,7 +626,7 @@ export function EntryForm(props: Props) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => (
+            {visibleRows.map(({ r, i }) => (
               <tr key={i} className="border-t border-neutral-100 align-top">
                 {cols.map((c) => (
                   <td key={c.key} className="px-2 py-1.5">
@@ -762,16 +800,54 @@ export function EntryForm(props: Props) {
       );
     }
     if (c.type === "qty") {
+      const nudge = (delta: number) => {
+        const cur = r[c.key] && r[c.key].trim() !== "" ? D(r[c.key]) : D(0);
+        const next = cur.plus(delta);
+        setCell(i, c.key, (next.lt(0) ? D(0) : next).toString());
+      };
+      const stockHint =
+        props.stockPrefill &&
+        c.key === props.stockPrefill.field &&
+        r.skuId &&
+        props.stockPrefill.stock[r.skuId];
       return (
-        <input
-          type="number"
-          step="0.001"
-          inputMode="decimal"
-          value={r[c.key] ?? ""}
-          onChange={(e) => setCell(i, c.key, e.target.value)}
-          // text-base on phones stops iOS auto-zoom; compact text-sm on desktop
-          className="w-full rounded border border-neutral-300 px-2 py-1.5 text-right text-base focus:outline-none focus:ring-2 focus:ring-brand-600 md:w-24 md:py-1 md:text-sm"
-        />
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-1.5">
+            {/* big thumb steppers on phones; typing stays the primary input */}
+            <button
+              type="button"
+              onClick={() => nudge(-1)}
+              aria-label={`decrease ${c.label}`}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-neutral-100 text-xl font-medium text-neutral-600 active:bg-neutral-300 md:hidden"
+            >
+              −
+            </button>
+            <input
+              type="number"
+              step="0.001"
+              inputMode="decimal"
+              value={r[c.key] ?? ""}
+              onChange={(e) => setCell(i, c.key, e.target.value)}
+              // text-base on phones stops iOS auto-zoom; compact text-sm on desktop
+              className="w-full rounded border border-neutral-300 px-2 py-1.5 text-right text-base focus:outline-none focus:ring-2 focus:ring-brand-600 md:w-24 md:py-1 md:text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => nudge(1)}
+              aria-label={`increase ${c.label}`}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-neutral-100 text-xl font-medium text-neutral-600 active:bg-neutral-300 md:hidden"
+            >
+              +
+            </button>
+          </div>
+          {stockHint && (
+            <span className="block text-[11px] text-neutral-400">
+              current stock: {stockHint}
+              {props.stockPrefill?.unit ? ` ${props.stockPrefill.unit}` : ""} — edit if you're
+              regrading less
+            </span>
+          )}
+        </div>
       );
     }
     if (c.type === "select") {
@@ -822,6 +898,11 @@ export function EntryForm(props: Props) {
             if (kind === "assembly" && c.key === "packSkuId" && v) {
               const mom = skuById.get(Number(v))?.motherSkuId;
               if (mom) setCell(i, "motherSkuId", String(mom));
+            }
+            // regrade: prefill the qty field with current stock (editable)
+            if (props.stockPrefill && v && (!r[props.stockPrefill.field] || r[props.stockPrefill.field].trim() === "")) {
+              const stock = props.stockPrefill.stock[v];
+              if (stock) setCell(i, props.stockPrefill.field, stock);
             }
           }}
           placeholder="Search SKU…"

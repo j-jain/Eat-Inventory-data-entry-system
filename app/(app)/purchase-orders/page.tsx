@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { openPurchaseOrders } from "@/lib/queries";
 import { PageHeader, Card } from "@/components/PageHeader";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
 export default async function PurchaseOrdersPage() {
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/purchase-orders");
   const isManager = hasRole(s.role, "MANAGER");
   const pos = await openPurchaseOrders();
   return (

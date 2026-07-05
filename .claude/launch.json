@@ -2,22 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "eat-inventory",
+      "name": "eat-preview-pglite",
       "runtimeExecutable": "npm.cmd",
-      "runtimeArgs": [
-        "run",
-        "dev"
-      ],
+      "runtimeArgs": ["run", "dev:preview"],
       "port": 3000,
       "autoPort": true
     },
     {
-      "name": "eat-inventory-prod",
+      "name": "eat-inventory-PROD-DB",
       "runtimeExecutable": "npm.cmd",
-      "runtimeArgs": [
-        "run",
-        "start"
-      ],
+      "runtimeArgs": ["run", "dev"],
       "port": 3000,
       "autoPort": true
     }

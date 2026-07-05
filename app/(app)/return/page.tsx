@@ -3,10 +3,12 @@ import { EntryForm } from "@/components/EntryForm";
 import { submitReturn } from "@/actions/entries";
 import { customerInvoices, invoiceLines } from "@/actions/returns";
 import { allActiveSkus, customers } from "@/lib/queries";
+import { requirePageAccess } from "@/lib/auth/access";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReturnPage() {
+  await requirePageAccess("/return");
   const [all, clist] = await Promise.all([allActiveSkus(), customers()]);
   const packs = all.filter((s) => s.motherSkuId);
   return (

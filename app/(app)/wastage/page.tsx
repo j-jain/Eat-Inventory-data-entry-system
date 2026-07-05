@@ -1,7 +1,8 @@
 import { PageHeader, Card } from "@/components/PageHeader";
 import { EntryForm } from "@/components/EntryForm";
 import { submitWastage } from "@/actions/entries";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { allActiveSkus, recentWastage, wastageBySource } from "@/lib/queries";
 import { WASTAGE_REASONS } from "@/lib/constants";
 import { ZOHO_PUSH_LABELS } from "@/lib/zoho/labels";
@@ -27,7 +28,7 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 export default async function WastagePage() {
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/wastage");
   const [all, waste, bySource] = await Promise.all([
     allActiveSkus(),
     recentWastage(),

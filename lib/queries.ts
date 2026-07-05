@@ -13,6 +13,7 @@ import {
   users,
   pickList,
   pickListLine,
+  pickListLineSource,
   pickListSource,
   manualOrderDoc,
   manualOrderLine,
@@ -31,6 +32,8 @@ export type SkuOption = {
   uom: string;
   packSizeText: string | null;
   motherSkuId: number | null;
+  /** set once the Items sync matched this SKU to a Zoho item */
+  zohoItemId: string | null;
 };
 
 const skuCols = {
@@ -41,6 +44,7 @@ const skuCols = {
   uom: skus.uom,
   packSizeText: skus.packSizeText,
   motherSkuId: skus.motherSkuId,
+  zohoItemId: skus.zohoItemId,
 };
 
 export async function motherSkus(): Promise<SkuOption[]> {
@@ -302,6 +306,8 @@ export type PickListLineRow = {
   motherCode: string | null;
   qtyToPick: string;
   qtyPicked: string;
+  /** which order(s) this line came from + how much each contributed */
+  from: { orderNo: string; qty: string; sourceType: string }[];
 };
 export type PickListDetail = {
   id: number;
@@ -313,6 +319,8 @@ export type PickListDetail = {
   completedAt: string | null;
   lines: PickListLineRow[];
   sources: { soCount: number; manualCount: number };
+  /** orders consumed by this list whose lines matched NO local SKU */
+  unmatchedOrders: string[];
 };
 
 /** The OPEN list if any, else the latest COMPLETED list for `date` (IST today by default). */
@@ -370,10 +378,36 @@ export async function currentPickList(date?: string): Promise<PickListDetail | n
       .where(eq(pickListLine.pickListId, head.id))
       .orderBy(skus.code),
     db
-      .select({ sourceType: pickListSource.sourceType })
+      .select({
+        sourceType: pickListSource.sourceType,
+        orderNo: pickListSource.orderNo,
+        matched: pickListSource.matched,
+      })
       .from(pickListSource)
       .where(eq(pickListSource.pickListId, head.id)),
   ]);
+  const lineIds = lines.map((l) => l.lineId);
+  const provenance = lineIds.length
+    ? await db
+        .select({
+          pickListLineId: pickListLineSource.pickListLineId,
+          orderNo: pickListLineSource.orderNo,
+          qty: pickListLineSource.qty,
+          sourceType: pickListLineSource.sourceType,
+        })
+        .from(pickListLineSource)
+        .where(inArray(pickListLineSource.pickListLineId, lineIds))
+    : [];
+  const fromByLine = new Map<number, PickListLineRow["from"]>();
+  for (const p of provenance) {
+    const arr = fromByLine.get(p.pickListLineId) ?? [];
+    arr.push({
+      orderNo: p.orderNo ?? "?",
+      qty: String(p.qty),
+      sourceType: String(p.sourceType),
+    });
+    fromByLine.set(p.pickListLineId, arr);
+  }
   return {
     id: head.id,
     businessDate: String(head.businessDate),
@@ -387,11 +421,15 @@ export async function currentPickList(date?: string): Promise<PickListDetail | n
       uom: String(l.uom),
       qtyToPick: String(l.qtyToPick),
       qtyPicked: String(l.qtyPicked),
+      from: fromByLine.get(l.lineId) ?? [],
     })),
     sources: {
       soCount: sources.filter((s) => s.sourceType === "ZOHO_SO").length,
       manualCount: sources.filter((s) => s.sourceType === "MANUAL_ORDER").length,
     },
+    unmatchedOrders: sources
+      .filter((s) => !s.matched)
+      .map((s) => s.orderNo ?? "unknown order"),
   };
 }
 

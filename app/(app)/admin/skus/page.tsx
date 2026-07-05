@@ -18,6 +18,7 @@ export default async function SkusPage() {
       packSizeText: skus.packSizeText,
       skuKind: skus.skuKind,
       isActive: skus.isActive,
+      zohoItemId: skus.zohoItemId,
     })
     .from(skus)
     .orderBy(skus.code);
@@ -25,7 +26,7 @@ export default async function SkusPage() {
     <div>
       <PageHeader
         title="SKUs"
-        subtitle="Add SKUs and toggle which are active (active SKUs appear in the entry dropdowns). History is never deleted."
+        subtitle="Add SKUs, toggle which are active (= appear in entry dropdowns), and see which are linked to Zoho items. History is never deleted."
       />
       <SkuAdmin skus={rows} />
     </div>

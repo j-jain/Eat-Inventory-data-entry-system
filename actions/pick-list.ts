@@ -9,6 +9,7 @@ import {
   manualOrderLine,
   pickList,
   pickListLine,
+  pickListLineSource,
   pickListSource,
   skus,
   zohoSoCache,
@@ -100,7 +101,7 @@ export async function generatePickList(clientToken?: string): Promise<PickAction
 
       // Unsourced posted manual orders
       const manuals = await tx
-        .select({ id: manualOrderDoc.id })
+        .select({ id: manualOrderDoc.id, orderRef: manualOrderDoc.orderRef })
         .from(manualOrderDoc)
         .where(
           and(
@@ -109,9 +110,16 @@ export async function generatePickList(clientToken?: string): Promise<PickAction
           ),
         );
       const manualIds = manuals.map((m: { id: number }) => m.id);
+      const manualNoById = new Map(
+        manuals.map((m: { id: number; orderRef: string | null }) => [
+          m.id,
+          m.orderRef || `manual #${m.id}`,
+        ]),
+      );
       const manualLines = manualIds.length
         ? await tx
             .select({
+              docId: manualOrderLine.docId,
               skuId: manualOrderLine.skuId,
               qty: manualOrderLine.qty,
               uom: manualOrderLine.uom,
@@ -128,32 +136,59 @@ export async function generatePickList(clientToken?: string): Promise<PickAction
       const byNorm = new Map<string, { id: number; uom: string }>();
       for (const k of skuList) byNorm.set(normalizeCode(k.code), { id: k.id, uom: k.uom });
 
-      // Aggregate qty per pack SKU.
-      const agg = new Map<number, { qty: ReturnType<typeof D>; uom: string }>();
-      const bump = (skuId: number, qty: string | number, uom: string) => {
-        const cur = agg.get(skuId);
-        agg.set(skuId, { qty: (cur?.qty ?? D(0)).plus(D(qty)), uom: cur?.uom ?? uom });
+      // Aggregate qty per pack SKU, remembering which order contributed what
+      // (per-line provenance powers the by-order / flat views).
+      type Contribution = {
+        sourceType: "ZOHO_SO" | "MANUAL_ORDER";
+        zohoSoId?: string;
+        manualOrderDocId?: number;
+        orderNo: string;
+        qty: string;
       };
-      const matchedSoIds: string[] = [];
+      const agg = new Map<
+        number,
+        { qty: ReturnType<typeof D>; uom: string; contribs: Contribution[] }
+      >();
+      const bump = (skuId: number, qty: string | number, uom: string, c: Contribution) => {
+        const cur = agg.get(skuId);
+        agg.set(skuId, {
+          qty: (cur?.qty ?? D(0)).plus(D(qty)),
+          uom: cur?.uom ?? uom,
+          contribs: [...(cur?.contribs ?? []), c],
+        });
+      };
+      const seenSos: { zohoSoId: string; orderNo: string; matched: boolean }[] = [];
       for (const so of sos) {
         const raw = Array.isArray(so.lineItems)
           ? (so.lineItems as Record<string, unknown>[])
           : [];
+        const orderNo = so.soNumber || String(so.zohoSoId);
         let matchedAny = false;
         for (const li of raw) {
           const m = byNorm.get(normalizeCode(String(li.sku ?? "")));
           if (!m) continue;
           const q = Number(li.quantity ?? 0);
           if (!(q > 0)) continue;
-          bump(m.id, q, m.uom);
+          bump(m.id, q, m.uom, {
+            sourceType: "ZOHO_SO",
+            zohoSoId: String(so.zohoSoId),
+            orderNo,
+            qty: qtyStr(q),
+          });
           matchedAny = true;
         }
         // Consume the SO either way once seen — an SO with zero matchable
-        // lines would otherwise re-appear on every Generate forever.
-        matchedSoIds.push(String(so.zohoSoId));
-        void matchedAny;
+        // lines would otherwise re-appear on every Generate forever. The
+        // matched=false flag makes that consumption VISIBLE instead of silent.
+        seenSos.push({ zohoSoId: String(so.zohoSoId), orderNo, matched: matchedAny });
       }
-      for (const ml of manualLines) bump(ml.skuId, ml.qty, ml.uom);
+      for (const ml of manualLines)
+        bump(ml.skuId, ml.qty, ml.uom, {
+          sourceType: "MANUAL_ORDER",
+          manualOrderDocId: ml.docId,
+          orderNo: String(manualNoById.get(ml.docId) ?? `manual #${ml.docId}`),
+          qty: qtyStr(ml.qty),
+        });
 
       const lines = [...agg.entries()];
       const isEmpty = lines.length === 0;
@@ -172,22 +207,42 @@ export async function generatePickList(clientToken?: string): Promise<PickAction
         .returning({ id: pickList.id });
 
       for (const [skuId, v] of lines) {
-        await tx.insert(pickListLine).values({
+        const [line] = await tx
+          .insert(pickListLine)
+          .values({
+            pickListId: list.id,
+            skuId,
+            qtyToPick: qtyStr(v.qty),
+            uom: v.uom as never,
+          })
+          .returning({ id: pickListLine.id });
+        for (const c of v.contribs) {
+          await tx.insert(pickListLineSource).values({
+            pickListLineId: line.id,
+            sourceType: c.sourceType,
+            zohoSoId: c.zohoSoId,
+            manualOrderDocId: c.manualOrderDocId,
+            orderNo: c.orderNo,
+            qty: c.qty,
+          });
+        }
+      }
+      for (const so of seenSos) {
+        await tx.insert(pickListSource).values({
           pickListId: list.id,
-          skuId,
-          qtyToPick: qtyStr(v.qty),
-          uom: v.uom as never,
+          sourceType: "ZOHO_SO",
+          zohoSoId: so.zohoSoId,
+          orderNo: so.orderNo,
+          matched: so.matched,
         });
       }
-      for (const soId of matchedSoIds) {
-        await tx
-          .insert(pickListSource)
-          .values({ pickListId: list.id, sourceType: "ZOHO_SO", zohoSoId: soId });
-      }
       for (const mId of manualIds) {
-        await tx
-          .insert(pickListSource)
-          .values({ pickListId: list.id, sourceType: "MANUAL_ORDER", manualOrderDocId: mId });
+        await tx.insert(pickListSource).values({
+          pickListId: list.id,
+          sourceType: "MANUAL_ORDER",
+          manualOrderDocId: mId,
+          orderNo: String(manualNoById.get(mId) ?? `manual #${mId}`),
+        });
       }
 
       revalidatePath("/pick-list");

@@ -1,6 +1,7 @@
 import { PageHeader } from "@/components/PageHeader";
 import { EditPoEditor, type ZohoPoLine } from "@/components/PoEditor";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { openPurchaseOrders } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +12,7 @@ export default async function EditPoPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/purchase-orders");
   if (!hasRole(s.role, "MANAGER")) {
     return (
       <div>

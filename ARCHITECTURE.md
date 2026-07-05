@@ -61,41 +61,48 @@ Zoho SO + manual orders ──▶ Pick List (MANDATORY gate) ──▶ DC Assemb
 - Every out-movement is **hard-blocked** below zero via `SELECT ... FOR UPDATE` inside a transaction (`lib/ledger/post.ts`); only an ADMIN adjustment can force it negative-to-zero-correcting (`allowNegative`).
 - Corrections are **reversing entries** (`voidDocumentLedger`) — nothing is ever destructively edited.
 
-## 4. The Zoho "connector"
+## 4. The Zoho "connector" (v3)
 
-The app treats Zoho (Zoho **Inventory** for items/stock/vendors/POs, Zoho **Books** for customers/invoices) as an external system of record it mostly *reads from*.
+The app treats Zoho (Zoho **Inventory** for items/stock/vendors/POs/SOs, Zoho **Books** for customers/bills) as an external system it *reads from* freely and *writes to* only through an explicit, registry-guarded push pipeline. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the owner-facing push map.
 
-### Guarantee: hard read-only, with one narrow, explicit exception
+### The write registry + push state machine
 
 | File | Role |
 |---|---|
 | [lib/zoho/config.ts](lib/zoho/config.ts) | Env-driven config (`ZOHO_DC`, `ZOHO_ORG_ID`, client id/secret/refresh token); `zohoConfig.enabled` gates everything |
 | [lib/zoho/token.ts](lib/zoho/token.ts) | OAuth token refresh, cached in the `zoho_token` table (+ an in-process memo) since serverless instances are ephemeral |
 | [lib/zoho/guard.ts](lib/zoho/guard.ts) | `assertReadOnly(method)` — throws on anything but `GET`. Every read call routes through this |
-| [lib/zoho/client.ts](lib/zoho/client.ts) | `zohoGet` (paced/retrying GET: 401→refresh, 429→backoff, 5xx→retry) and `zohoPaged` (pages a list endpoint) |
-| [lib/zoho/write-guard.ts](lib/zoho/write-guard.ts) | `assertDraftCreate(method, path)` — the **only** exception to read-only: allows `POST` to an explicit allowlist (currently just `/inventory/v1/inventoryadjustments`). Any other method or path throws |
-| [lib/zoho/write.ts](lib/zoho/write.ts) | `zohoCreateDraft` — the **one** write function in the whole codebase. Conservative retries (never retries a transport error/5xx, since a POST isn't idempotent) |
-| [lib/zoho/drafts.ts](lib/zoho/drafts.ts) | Per-doc-type "build a Zoho draft payload" functions. Only `INV_ADJUSTMENT` is wired; Receiving/Assembly/Wastage/Return throw `NotMappedError` until specified |
-| [lib/zoho/sync.ts](lib/zoho/sync.ts) | Bulk **read** sync: `syncItems`, `syncVendors`, `syncCustomers`, `syncPurchaseOrders`. Each logs to `sync_log`; `lastSyncAt()` reads that log as the incremental watermark (no separate state table) |
-| [lib/zoho/reads.ts](lib/zoho/reads.ts) | On-demand reads not worth bulk-caching: `fetchCustomerInvoices`, `getInvoiceDetail` (used live by the Returns tab) |
+| [lib/zoho/client.ts](lib/zoho/client.ts) | `zohoGet` (paced/retrying GET: 401→refresh, 429→backoff, 5xx→retry) and `zohoPaged`. Every attempt increments the daily API budget counter |
+| [lib/zoho/write-guard.ts](lib/zoho/write-guard.ts) | `ZOHO_WRITES` registry — the security guard AND the "where does this land" label source. Every write must match one entry by method + path pattern; DELETE/PATCH can never match; the only PUT is the PO edit |
+| [lib/zoho/write.ts](lib/zoho/write.ts) | `zohoWrite` — the one write function. Retries only 401/429 (rejected before processing); a transport error throws `ZohoApiError(0)` = *ambiguous outcome* |
+| [lib/zoho/drafts.ts](lib/zoho/drafts.ts) | `PUSH_BUILDERS` per kind: receives, bills, adjustments, bundles, PO drafts. Each request declares its idem-reference (stamped into the payload) and a response contract for extracting the created Zoho id |
+| [lib/zoho/push-state.ts](lib/zoho/push-state.ts) | The `zoho_push` state machine: PENDING → IN_FLIGHT (atomic claim) → SUCCESS / FAILED (definite 4xx, re-claimable) / UNKNOWN (ambiguous — never auto-retried) |
+| [lib/zoho/resolve.ts](lib/zoho/resolve.ts) | The reconciler: searches Zoho (read-only) for a push's idem-reference to settle UNKNOWN outcomes without ever risking a duplicate |
+| [lib/zoho/review.ts](lib/zoho/review.ts) | Review queue + push history, both reading `zoho_push` |
+| [lib/zoho/po-workspace.ts](lib/zoho/po-workspace.ts) | Aniket's PO cards: lines with ordered/received/remaining, receipts + their push states, close-remainder eligibility |
+| [lib/zoho/sync.ts](lib/zoho/sync.ts) | Bulk **read** sync: items (full catalog + EAT-SKU linking), vendors, customers, open POs, open SOs. Each run logs to `sync_log` (the incremental watermark) |
+| [lib/zoho/reads.ts](lib/zoho/reads.ts) | On-demand reads not worth bulk-caching: `fetchCustomerInvoices`, `getInvoiceDetail` (Returns tab) |
 
-There is **no update/delete function anywhere** in `lib/zoho`. There's no way to accidentally add one either — every write attempt must pass `assertDraftCreate`, and every read must pass `assertReadOnly`.
+Key duplicate-safety properties:
+- a push must atomically **claim** its `zoho_push` row (`UPDATE … WHERE status IN ('PENDING','FAILED') RETURNING`) — double-clicks and racing bulk pushes cannot send twice;
+- every payload carries an **idem reference** (`EAT-RCV-12`, `EAT-ADJ-7`, `EAT-ASM-3-L9`, bills' `reference_number`, …);
+- ambiguous outcomes (transport error / 5xx) park as **UNKNOWN** and only the reference-searching reconciler can move them;
+- voiding a doc with a SUCCESS push is blocked (ADMIN override is audited) because a local void never un-pushes anything.
 
 ### What's actually synced (and what isn't)
 
-Sync is deliberately **lean**, not a full mirror of Zoho:
-- **Items**: only Zoho items that match an existing EAT SKU by normalized code are cached; everything else is skipped (no catalog bloat). Matching sets `skus.zoho_item_id`.
-- **Purchase orders**: only *open* (not closed/cancelled/fully-received) POs are kept; line-item detail is fetched only for those. A PO that becomes closed mid-window is deleted from the cache so it drops off the Receiving sheet.
+- **Items**: ALL active Zoho items are cached (the Live Inventory shows the whole catalog); those matching an EAT SKU by normalized code additionally get `skus.zoho_item_id` set.
+- **Purchase orders / sales orders**: only *open* ones are kept, with line detail; closed ones are deleted from the cache so they drop off the sheets.
 - **Invoices**: never bulk-pulled — fetched live, per customer, only when a Returns entry needs them.
 - **Vendors/customers**: full pull (small lists).
 
 ### Where Zoho touches the UI
 
-- **Admin → Zoho Sync** ([app/(app)/admin/sync/page.tsx](app/(app)/admin/sync/page.tsx)) — manual "Pull Items/Vendors/Customers/POs/Everything" buttons ([components/SyncPanel.tsx](components/SyncPanel.tsx) → [actions/zoho.ts](actions/zoho.ts)), a table of the last 20 sync runs, and (only if `ALLOW_RESET=true`) the danger-zone reset panel.
-- **Receiving** — pre-lists every open PO's lines (`lib/queries.ts: openPurchaseOrdersForReceiving`).
-- **Returns** — picking a customer live-loads their recent Zoho invoices; picking an invoice live-loads its line items, pre-filling the return sheet (`actions/returns.ts`).
-- **Push draft to Zoho** button (EntryForm, on Receiving/Assembly/Adjustment/Wastage/Return after a save) — calls `actions/zoho-drafts.ts: pushDraftToZoho`, which is idempotent (checks `app_audit_log` for a prior push before creating a duplicate).
-- **Daily cron** (`app/api/cron/sync/route.ts`) — incremental pull of Items/Vendors/Customers/POs, scheduled by `vercel.json` at `0 1 * * *` UTC (06:30 IST), protected by a `CRON_SECRET` bearer token.
+- **Review & Push** ([app/(app)/review/page.tsx](app/(app)/review/page.tsx)) — Aniket's cockpit: Purchase Orders workspace (receive/bill pushes, inline PO edit, close-remainder), Inventory pushes, Books pushes, Combined stock, History. Every card shows the exact payload before sending.
+- **Admin → Zoho Sync** — manual pull buttons + last-20 sync runs + (if `ALLOW_RESET=true`) the reset danger zone. ADMIN-only.
+- **Admin → Developer** — API budget meter, push health, sync health, error stream.
+- **Receiving** — pre-lists every open PO's lines; **Returns** — live invoice loads.
+- **Cron** (`app/api/cron/sync/route.ts`) — incremental pull, Vercel daily + GitHub Actions 6×/day, `CRON_SECRET`-protected, serialized by a pooler-safe row mutex (`sync_mutex`).
 
 ## 5. Database schema (`lib/db/schema.ts`)
 

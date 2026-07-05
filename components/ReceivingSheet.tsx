@@ -93,6 +93,7 @@ export function ReceivingSheet({
         pushLabel={pushLabel}
         allowAddRow={allowAddRow}
         beforeSubmit={beforeSubmit}
+        searchable="Search PO number, vendor or item…"
       />
       {dialog && (
         <ReceivingVarianceDialog

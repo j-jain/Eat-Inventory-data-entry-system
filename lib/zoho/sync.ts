@@ -64,10 +64,10 @@ async function runSync(entity: string, fn: () => Promise<number>): Promise<numbe
 }
 
 /**
- * Items + stock-on-hand — LEAN: only keep/link Zoho items that match an
- * existing EAT SKU (by normalized code). Non-produce items are skipped entirely
- * (no catalog bloat). Sets zoho_item_id on the SKU + caches stock for the
- * opening-balance backfill.
+ * Items + stock-on-hand — v3: cache EVERY active Zoho item (the Live
+ * Inventory "all items" view needs the full catalog), and additionally link
+ * the ones whose sku matches an EAT SKU (by normalized code). Whether an
+ * item is "matched" is derivable via skus.zoho_item_id — no extra column.
  */
 export function syncItems(since?: Date) {
   return runSync("ITEM", async () => {
@@ -90,12 +90,11 @@ export function syncItems(since?: Date) {
       status: "active",
       ...sinceParam(since),
     });
-    let matched = 0;
+    let pulled = 0;
     for (const it of items) {
-      const norm = normalizeCode(it.sku ?? "");
-      if (!norm) continue;
-      const skuId = idByNorm.get(norm);
-      if (!skuId) continue; // skip non-EAT / unknown items (lean scope)
+      const rawSku = it.sku ?? "";
+      const norm = normalizeCode(rawSku);
+      const skuId = norm ? idByNorm.get(norm) : undefined;
 
       const stock = String(it.actual_available_stock ?? it.stock_on_hand ?? 0);
       await db
@@ -103,7 +102,7 @@ export function syncItems(since?: Date) {
         .values({
           zohoItemId: String(it.item_id),
           itemName: it.name ?? "",
-          skuText: norm,
+          skuText: skuId ? norm : rawSku,
           stockOnHand: stock,
           rate: it.rate != null ? String(it.rate) : null,
           lastModifiedTime: it.last_modified_time,
@@ -112,20 +111,22 @@ export function syncItems(since?: Date) {
           target: zohoItemCache.zohoItemId,
           set: {
             itemName: it.name ?? "",
-            skuText: norm,
+            skuText: skuId ? norm : rawSku,
             stockOnHand: stock,
             rate: it.rate != null ? String(it.rate) : null,
             lastModifiedTime: it.last_modified_time,
             fetchedAt: new Date(),
           },
         });
-      await db
-        .update(skus)
-        .set({ zohoItemId: String(it.item_id) })
-        .where(eq(skus.id, skuId));
-      matched++;
+      if (skuId) {
+        await db
+          .update(skus)
+          .set({ zohoItemId: String(it.item_id) })
+          .where(eq(skus.id, skuId));
+      }
+      pulled++;
     }
-    return matched;
+    return pulled;
   });
 }
 

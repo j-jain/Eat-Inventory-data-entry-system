@@ -1,7 +1,8 @@
 import { PageHeader, Card } from "@/components/PageHeader";
 import { AssemblyTabs } from "@/components/AssemblyTabs";
 import { WorkflowLock } from "@/components/WorkflowLock";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { motherSkus, packSkusByChannel, currentPickList } from "@/lib/queries";
 import { pickListGate, istToday } from "@/lib/workflow";
 import { ZOHO_PUSH_LABELS } from "@/lib/zoho/labels";
@@ -10,7 +11,7 @@ import { WASTAGE_REASONS } from "@/lib/constants";
 export const dynamic = "force-dynamic";
 
 export default async function AssemblyPage() {
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/assembly");
   const isManager = hasRole(s.role, "MANAGER");
   const gate = await pickListGate();
 

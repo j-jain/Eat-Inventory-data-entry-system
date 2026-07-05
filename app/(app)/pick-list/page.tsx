@@ -1,13 +1,14 @@
 import { PageHeader } from "@/components/PageHeader";
 import { PickListClient } from "@/components/PickListClient";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { pickListGate, istToday } from "@/lib/workflow";
 import { currentPickList } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function PickListPage() {
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/pick-list");
   const [gate, list] = await Promise.all([pickListGate(), currentPickList(istToday())]);
   return (
     <div>

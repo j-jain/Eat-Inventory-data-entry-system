@@ -3,6 +3,7 @@
 import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { SearchSelect, type Option } from "@/components/SearchSelect";
+import { ReasonDialog } from "@/components/ReasonDialog";
 import { submitManualOrder, voidManualOrder } from "@/actions/orders";
 import type { SkuOption, ManualOrderRow } from "@/lib/queries";
 import { newToken } from "@/lib/utils";
@@ -253,17 +254,13 @@ function OrderCard({ order, isSupervisor }: { order: ManualOrderRow; isSuperviso
   const router = useRouter();
   const [pending, start] = useTransition();
   const [err, setErr] = useState<string | null>(null);
+  const [voidOpen, setVoidOpen] = useState(false);
 
-  function voidOrder() {
-    const r = window.prompt("Reason to void this order:");
-    if (r == null) return;
-    if (r.trim().length < 3) {
-      setErr("A void reason of at least 3 characters is required.");
-      return;
-    }
+  function voidWith(reason: string) {
+    setVoidOpen(false);
     setErr(null);
     start(async () => {
-      const res = await voidManualOrder(order.id, r.trim());
+      const res = await voidManualOrder(order.id, reason);
       if (res.ok) router.refresh();
       else setErr(res.error);
     });
@@ -271,6 +268,16 @@ function OrderCard({ order, isSupervisor }: { order: ManualOrderRow; isSuperviso
 
   return (
     <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+      {voidOpen && (
+        <ReasonDialog
+          title={`Void order #${order.id}`}
+          description="The order is removed from pick-list consideration."
+          confirmLabel="Void order"
+          tone="red"
+          onConfirm={voidWith}
+          onCancel={() => setVoidOpen(false)}
+        />
+      )}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <span className="font-mono text-xs text-neutral-500">#{order.id}</span>
@@ -294,7 +301,7 @@ function OrderCard({ order, isSupervisor }: { order: ManualOrderRow; isSuperviso
           {isSupervisor && !order.picked && (
             <button
               type="button"
-              onClick={voidOrder}
+              onClick={() => setVoidOpen(true)}
               disabled={pending}
               className="rounded-md border border-neutral-300 px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-50 disabled:opacity-50"
             >

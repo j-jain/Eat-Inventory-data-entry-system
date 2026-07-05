@@ -20,7 +20,10 @@ declare global {
 }
 
 function createDb(): DB {
-  const url = process.env.DATABASE_URL;
+  // FORCE_PGLITE=1 pins the in-process DB even when DATABASE_URL is set —
+  // the reliable local-isolation switch on Windows, where an empty-string
+  // env var is silently dropped from child-process environment blocks.
+  const url = process.env.FORCE_PGLITE === "1" ? undefined : process.env.DATABASE_URL;
 
   if (url) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -31,6 +34,10 @@ function createDb(): DB {
     const pool = new Pool({
       connectionString: url,
       max: Number(process.env.DB_POOL_MAX ?? 5),
+      // TLS in transit, but certificate validation is off — Supabase's pooler
+      // presents a cert most Node images can't chain. Acceptable for this
+      // deployment (Vercel ↔ Supabase over their backbones); to pin instead,
+      // download Supabase's CA and pass { ca } here.
       ssl: isLocal ? undefined : { rejectUnauthorized: false },
     });
     return drizzle(pool, { schema, casing: "snake_case" }) as DB;
@@ -42,6 +49,7 @@ function createDb(): DB {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { drizzle } = require("drizzle-orm/pglite");
   const dir = process.env.PGLITE_DIR || "./.pglite-data";
+  console.log(`[db] PGlite @ ${dir} (local, isolated)`);
   const client = new PGlite(dir);
   return drizzle(client, { schema, casing: "snake_case" }) as unknown as DB;
 }

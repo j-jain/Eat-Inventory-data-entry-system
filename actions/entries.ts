@@ -20,6 +20,8 @@ import {
   invAdjustmentLine,
   dispatchDoc,
   dispatchLine,
+  zohoPush,
+  appAuditLog,
 } from "@/lib/db/schema";
 import {
   applyMovements,
@@ -1308,12 +1310,62 @@ export async function voidDocument(
   docType: keyof typeof docTables,
   docId: number,
   reason: string,
+  opts?: { overridePushed?: boolean },
 ): Promise<ActionResult> {
   const s = await requireSupervisor();
   if (!reason || reason.trim().length < 3)
     return { ok: false, error: "A void reason is required." };
   const businessDate = istToday();
   const table = docTables[docType];
+
+  // Zoho guard: voiding here never un-pushes anything. If this doc (or a
+  // cascade companion) already reached Zoho, block — the operator must fix
+  // Zoho manually first. ADMIN can override explicitly, which is audited.
+  const pushedKeys: { docType: string; docId: number }[] = [{ docType, docId }];
+  if (docType === "RECEIVING" || docType === "ASSEMBLY") {
+    const linkedWaste = await db
+      .selectDistinct({ docId: wastageLine.docId })
+      .from(wastageLine)
+      .where(and(eq(wastageLine.sourceDocType, docType), eq(wastageLine.sourceDocId, docId)));
+    for (const w of linkedWaste) pushedKeys.push({ docType: "WASTAGE", docId: w.docId });
+  }
+  if (docType === "RECEIVING") {
+    const linkedAdj = await db
+      .select({ id: invAdjustmentDoc.id })
+      .from(invAdjustmentDoc)
+      .where(eq(invAdjustmentDoc.against, `RECEIVING:${docId}`));
+    for (const a of linkedAdj) pushedKeys.push({ docType: "INV_ADJUSTMENT", docId: a.id });
+  }
+  const pushedRows = await db
+    .select({
+      kind: zohoPush.kind,
+      docType: zohoPush.docType,
+      docId: zohoPush.docId,
+      zohoId: zohoPush.zohoId,
+    })
+    .from(zohoPush)
+    .where(
+      and(
+        eq(zohoPush.status, "SUCCESS"),
+        inArray(zohoPush.docType, [...new Set(pushedKeys.map((k) => k.docType))]),
+        inArray(zohoPush.docId, [...new Set(pushedKeys.map((k) => k.docId))]),
+      ),
+    );
+  const actuallyPushed = pushedRows.filter((r) =>
+    pushedKeys.some((k) => k.docType === r.docType && k.docId === r.docId),
+  );
+  if (actuallyPushed.length) {
+    const list = actuallyPushed
+      .map((r) => `${r.kind} → Zoho ${r.zohoId ?? "(id not recorded)"}`)
+      .join("; ");
+    if (!(opts?.overridePushed && hasRole(s.role, "ADMIN"))) {
+      return {
+        ok: false,
+        error: `Already pushed to Zoho (${list}). Voiding here will NOT remove it from Zoho — correct Zoho manually first; then an ADMIN can void with override.`,
+      };
+    }
+  }
+
   try {
     await db.transaction(async (tx: Tx) => {
       // Cascade: receiving/assembly may have auto-created companion docs
@@ -1388,6 +1440,16 @@ export async function voidDocument(
         .set({ docStatus: "VOIDED", voidedByUserId: s.uid, voidedAt: new Date(), voidReason: reason })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .where(eq((table as any).id, docId));
+      if (actuallyPushed.length) {
+        // ADMIN chose to void despite Zoho records existing — leave a loud trail.
+        await tx.insert(appAuditLog).values({
+          userId: s.uid,
+          action: "VOID_PUSHED_OVERRIDE",
+          docType,
+          docId,
+          payload: { reason, zohoRecords: actuallyPushed },
+        });
+      }
     });
     revalidatePath("/dashboard");
     return { ok: true, docId };

@@ -10,7 +10,9 @@ dotenv.config({ path: ".env.local" });
 dotenv.config();
 
 async function main() {
-  const url = process.env.DATABASE_URL;
+  // FORCE_PGLITE=1 → local PGlite regardless of DATABASE_URL (empty-string
+  // env vars don't survive Windows child processes, so this is the switch).
+  const url = process.env.FORCE_PGLITE === "1" ? undefined : process.env.DATABASE_URL;
   const migrationsFolder = "./drizzle";
 
   if (url) {

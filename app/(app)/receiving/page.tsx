@@ -1,13 +1,14 @@
 import { PageHeader, Card } from "@/components/PageHeader";
 import { ReceivingSheet } from "@/components/ReceivingSheet";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { motherSkus, openPurchaseOrdersForReceiving } from "@/lib/queries";
 import { ZOHO_PUSH_LABELS } from "@/lib/zoho/labels";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReceivingPage() {
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/receiving");
   const isManager = hasRole(s.role, "MANAGER");
   const [mothers, pos] = await Promise.all([
     motherSkus(),

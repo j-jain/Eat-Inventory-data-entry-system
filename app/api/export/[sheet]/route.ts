@@ -3,6 +3,7 @@ import { and, asc, eq, gte, lte } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { stockLedger, skus, users, locations } from "@/lib/db/schema";
 import { getSession } from "@/lib/auth/session";
+import { hasRole } from "@/lib/auth/rbac";
 import { gradeComposition } from "@/lib/ledger/balance";
 import { dailySummary } from "@/lib/queries";
 import { istToday } from "@/lib/workflow";
@@ -28,6 +29,9 @@ export async function GET(
 ) {
   const s = await getSession();
   if (!s) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // CSV exports expose the full ledger/summary — manager and admin only.
+  if (!hasRole(s.role, "MANAGER"))
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
   const { sheet } = await params;
   const from = req.nextUrl.searchParams.get("from") || undefined;
   const to = req.nextUrl.searchParams.get("to") || undefined;

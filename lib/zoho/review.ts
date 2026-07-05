@@ -1,7 +1,6 @@
-import { and, desc, eq, gte, inArray, like, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  appAuditLog,
   assemblyDoc,
   assemblyLine,
   invAdjustmentDoc,
@@ -9,16 +8,18 @@ import {
   receivingDoc,
   wastageDoc,
   wastageLine,
+  zohoPush,
 } from "@/lib/db/schema";
 import { ZOHO_PUSH_LABELS, type ZohoPushKind } from "./labels";
 
 /**
  * Aniket's Review & Push queue: every POSTED document that can go to Zoho,
- * with its push status per destination. Status is derived from app_audit_log
- * rows (`ZOHO_PUSH:<kind>:<subKey>` success / `ZOHO_PUSH_FAIL:…` failure) —
- * no extra state table.
+ * with its push status per destination. v3: status comes from the zoho_push
+ * state table ("no row yet" = PENDING). UNKNOWN means the last attempt's
+ * outcome is ambiguous — it must be reconciled against Zoho, never blind-
+ * retried.
  */
-export type ReviewStatus = "PENDING" | "PUSHED" | "PARTIAL" | "FAILED";
+export type ReviewStatus = "PENDING" | "PUSHED" | "PARTIAL" | "FAILED" | "UNKNOWN";
 export type ReviewRow = {
   kind: Exclude<ZohoPushKind, "po.update">;
   docType: string;
@@ -28,46 +29,112 @@ export type ReviewRow = {
   landsIn: string;
   status: ReviewStatus;
   error: string | null;
+  zohoId: string | null;
+  zohoNumber: string | null;
+  pushedAt: string | null;
   /** for multi-request kinds (bundles): pushed / total */
   progress?: { pushed: number; total: number };
 };
 
-type AuditRow = { action: string; docType: string | null; docId: number | null; payload: unknown; id: number };
+type PushStateRow = {
+  kind: string;
+  docType: string;
+  docId: number;
+  subKey: string;
+  status: string;
+  error: string | null;
+  zohoId: string | null;
+  zohoNumber: string | null;
+  pushedAt: Date | null;
+  updatedAt: Date;
+};
 
 function statusFor(
   kind: string,
   docType: string,
   docId: number,
   needed: number,
-  audits: AuditRow[],
-): { status: ReviewStatus; error: string | null; pushed: number } {
-  const mine = audits.filter((a) => a.docType === docType && a.docId === docId);
-  const successes = new Set(
-    mine
-      .filter((a) => a.action.startsWith(`ZOHO_PUSH:${kind}:`))
-      .map((a) => a.action),
+  pushRows: PushStateRow[],
+): {
+  status: ReviewStatus;
+  error: string | null;
+  pushed: number;
+  zohoId: string | null;
+  zohoNumber: string | null;
+  pushedAt: string | null;
+} {
+  const mine = pushRows.filter(
+    (r) => r.kind === kind && r.docType === docType && r.docId === docId,
   );
-  // legacy v1 rows count as a push for adjustments
-  const legacy = mine.some((a) => a.action === "ZOHO_DRAFT_CREATED");
-  const pushed = successes.size + (legacy && kind === "adjustment.adj" ? 1 : 0);
+  const successes = mine.filter((r) => r.status === "SUCCESS");
+  const unknowns = mine
+    .filter((r) => r.status === "UNKNOWN" || r.status === "IN_FLIGHT")
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
   const fails = mine
-    .filter((a) => a.action.startsWith(`ZOHO_PUSH_FAIL:${kind}:`))
-    .sort((a, b) => b.id - a.id);
-  if (pushed >= needed) return { status: "PUSHED", error: null, pushed };
-  if (pushed > 0) return { status: "PARTIAL", error: latestError(fails), pushed };
-  if (fails.length) return { status: "FAILED", error: latestError(fails), pushed };
-  return { status: "PENDING", error: null, pushed };
+    .filter((r) => r.status === "FAILED")
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  const pushed = successes.length;
+  const first = successes[0];
+  const base = {
+    pushed,
+    zohoId: first?.zohoId ?? null,
+    zohoNumber: first?.zohoNumber ?? null,
+    pushedAt: first?.pushedAt ? new Date(first.pushedAt).toISOString() : null,
+  };
+  if (pushed >= needed) return { status: "PUSHED", error: null, ...base };
+  if (unknowns.length)
+    return {
+      status: "UNKNOWN",
+      error:
+        unknowns[0].error ??
+        "Outcome of the last attempt is unknown — reconcile against Zoho before retrying.",
+      ...base,
+    };
+  if (pushed > 0) return { status: "PARTIAL", error: fails[0]?.error ?? null, ...base };
+  if (fails.length) return { status: "FAILED", error: fails[0]?.error ?? null, ...base };
+  return { status: "PENDING", error: null, ...base };
 }
 
-function latestError(fails: AuditRow[]): string | null {
-  const p = fails[0]?.payload as { error?: string } | undefined;
-  return p?.error ?? null;
+/** Everything that has confirmedly landed in Zoho, newest first (History tab). */
+export type PushHistoryRow = {
+  id: number;
+  kind: string;
+  docType: string;
+  docId: number;
+  subKey: string;
+  idemRef: string | null;
+  zohoId: string | null;
+  zohoNumber: string | null;
+  pushedAt: string | null;
+};
+
+export async function pushHistory(limit = 300): Promise<PushHistoryRow[]> {
+  const rows = await db
+    .select({
+      id: zohoPush.id,
+      kind: zohoPush.kind,
+      docType: zohoPush.docType,
+      docId: zohoPush.docId,
+      subKey: zohoPush.subKey,
+      idemRef: zohoPush.idemRef,
+      zohoId: zohoPush.zohoId,
+      zohoNumber: zohoPush.zohoNumber,
+      pushedAt: zohoPush.pushedAt,
+    })
+    .from(zohoPush)
+    .where(eq(zohoPush.status, "SUCCESS"))
+    .orderBy(desc(zohoPush.pushedAt))
+    .limit(limit);
+  return rows.map((r) => ({
+    ...r,
+    pushedAt: r.pushedAt ? new Date(r.pushedAt).toISOString() : null,
+  }));
 }
 
 export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
   const cutoff = sql`CURRENT_DATE - ${days}::int`;
 
-  const [receivings, wastages, adjustments, assemblies, assemblyLineCounts, poDrafts, audits] =
+  const [receivings, wastages, adjustments, assemblies, assemblyLineCounts, poDrafts, pushRows] =
     await Promise.all([
       db
         .select({
@@ -129,14 +196,27 @@ export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
         .limit(200),
       db
         .select({
-          id: appAuditLog.id,
-          action: appAuditLog.action,
-          docType: appAuditLog.docType,
-          docId: appAuditLog.docId,
-          payload: appAuditLog.payload,
+          kind: zohoPush.kind,
+          docType: zohoPush.docType,
+          docId: zohoPush.docId,
+          subKey: zohoPush.subKey,
+          status: zohoPush.status,
+          error: zohoPush.error,
+          zohoId: zohoPush.zohoId,
+          zohoNumber: zohoPush.zohoNumber,
+          pushedAt: zohoPush.pushedAt,
+          updatedAt: zohoPush.updatedAt,
         })
-        .from(appAuditLog)
-        .where(like(appAuditLog.action, "ZOHO_%")),
+        .from(zohoPush)
+        .where(
+          inArray(zohoPush.docType, [
+            "RECEIVING",
+            "WASTAGE",
+            "INV_ADJUSTMENT",
+            "ASSEMBLY",
+            "PO_DRAFT",
+          ]),
+        ),
     ]);
 
   // wastage docs that are RECEIVING-S4 auto docs vs manual — label only
@@ -155,7 +235,7 @@ export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
   for (const r of receivings) {
     if (!r.zohoPoId) continue; // off-PO receipts push via their linked adjustment
     for (const kind of ["receiving.receive", "receiving.bill"] as const) {
-      const st = statusFor(kind, "RECEIVING", r.id, 1, audits);
+      const st = statusFor(kind, "RECEIVING", r.id, 1, pushRows);
       rows.push({
         kind,
         docType: "RECEIVING",
@@ -165,11 +245,14 @@ export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
         landsIn: ZOHO_PUSH_LABELS[kind],
         status: st.status,
         error: st.error,
+        zohoId: st.zohoId,
+        zohoNumber: st.zohoNumber,
+        pushedAt: st.pushedAt,
       });
     }
   }
   for (const w of wastages) {
-    const st = statusFor("wastage.adj", "WASTAGE", w.id, 1, audits);
+    const st = statusFor("wastage.adj", "WASTAGE", w.id, 1, pushRows);
     rows.push({
       kind: "wastage.adj",
       docType: "WASTAGE",
@@ -179,10 +262,13 @@ export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
       landsIn: ZOHO_PUSH_LABELS["wastage.adj"],
       status: st.status,
       error: st.error,
+      zohoId: st.zohoId,
+      zohoNumber: st.zohoNumber,
+      pushedAt: st.pushedAt,
     });
   }
   for (const a of adjustments) {
-    const st = statusFor("adjustment.adj", "INV_ADJUSTMENT", a.id, 1, audits);
+    const st = statusFor("adjustment.adj", "INV_ADJUSTMENT", a.id, 1, pushRows);
     rows.push({
       kind: "adjustment.adj",
       docType: "INV_ADJUSTMENT",
@@ -192,11 +278,14 @@ export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
       landsIn: ZOHO_PUSH_LABELS["adjustment.adj"],
       status: st.status,
       error: st.error,
+      zohoId: st.zohoId,
+      zohoNumber: st.zohoNumber,
+      pushedAt: st.pushedAt,
     });
   }
   for (const a of assemblies) {
     const total = lineCount.get(a.id) ?? 1;
-    const st = statusFor("assembly.bundle", "ASSEMBLY", a.id, total, audits);
+    const st = statusFor("assembly.bundle", "ASSEMBLY", a.id, total, pushRows);
     rows.push({
       kind: "assembly.bundle",
       docType: "ASSEMBLY",
@@ -206,11 +295,14 @@ export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
       landsIn: ZOHO_PUSH_LABELS["assembly.bundle"],
       status: st.status,
       error: st.error,
+      zohoId: st.zohoId,
+      zohoNumber: st.zohoNumber,
+      pushedAt: st.pushedAt,
       progress: { pushed: st.pushed, total },
     });
   }
   for (const p of poDrafts) {
-    const st = statusFor("podraft.create", "PO_DRAFT", p.id, 1, audits);
+    const st = statusFor("podraft.create", "PO_DRAFT", p.id, 1, pushRows);
     rows.push({
       kind: "podraft.create",
       docType: "PO_DRAFT",
@@ -218,13 +310,23 @@ export async function reviewQueue(days = 30): Promise<ReviewRow[]> {
       businessDate: String(p.businessDate),
       summary: `PO draft #${p.id} · ${p.vendorName ?? "vendor?"}${p.zohoPoId ? ` · Zoho ${p.zohoPoId}` : ""}`,
       landsIn: ZOHO_PUSH_LABELS["podraft.create"],
+      // dual truth: poDraftDoc.zohoPoId is an independent success signal
       status: p.zohoPoId ? "PUSHED" : st.status,
       error: st.error,
+      zohoId: st.zohoId ?? p.zohoPoId,
+      zohoNumber: st.zohoNumber,
+      pushedAt: st.pushedAt,
     });
   }
 
-  // pending & failed first, then partial, pushed last; newest date first inside
-  const rank: Record<ReviewStatus, number> = { FAILED: 0, PENDING: 1, PARTIAL: 2, PUSHED: 3 };
+  // needs-attention first: failed & unknown, then pending, partial, pushed
+  const rank: Record<ReviewStatus, number> = {
+    FAILED: 0,
+    UNKNOWN: 1,
+    PENDING: 2,
+    PARTIAL: 3,
+    PUSHED: 4,
+  };
   rows.sort(
     (a, b) =>
       rank[a.status] - rank[b.status] ||

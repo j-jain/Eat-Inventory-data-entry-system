@@ -2,7 +2,10 @@ import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
 
 const COOKIE = "eat_session";
-const MAX_AGE = 60 * 60 * 12; // one shift
+// 30 days — "remember this device". The JWT is identity-only: role, active
+// status and page permissions are re-read from the DB on every request
+// (lib/auth/access.ts), so a long session can't outlive a block/role change.
+const MAX_AGE = 60 * 60 * 24 * 30;
 
 export type Role = "FLOOR" | "SUPERVISOR" | "MANAGER" | "ADMIN";
 export type Session = { uid: number; name: string; role: Role };
@@ -16,7 +19,7 @@ export async function createSession(s: Session): Promise<void> {
   const token = await new SignJWT({ uid: s.uid, name: s.name, role: s.role })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("12h")
+    .setExpirationTime("30d")
     .sign(secret());
   const c = await cookies();
   c.set(COOKIE, token, {

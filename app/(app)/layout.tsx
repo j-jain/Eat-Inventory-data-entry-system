@@ -1,7 +1,9 @@
 import Image from "next/image";
-import { requireUser } from "@/lib/auth/rbac";
-import { Nav } from "@/components/Nav";
+import { redirect } from "next/navigation";
+import { currentAccess } from "@/lib/auth/access";
+import { Sidebar } from "@/components/Sidebar";
 import { MobileNav } from "@/components/MobileNav";
+import { InstallHint } from "@/components/InstallHint";
 import { SignOutButton } from "@/components/SignOutButton";
 
 export default async function AppLayout({
@@ -9,27 +11,16 @@ export default async function AppLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const user = await requireUser();
+  // Live DB check every request: a blocked user (or stale JWT after a role
+  // change) bounces straight to /login regardless of cookie validity.
+  const access = await currentAccess();
+  if (!access) redirect("/login");
+  const user = access.session;
+  const allowed = [...access.pages];
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
-      {/* desktop sidebar */}
-      <aside className="hidden w-60 shrink-0 border-r border-neutral-200 bg-white p-4 md:block">
-        <div className="mb-6 flex items-center gap-2.5 px-3">
-          <Image
-            src="/eat-logo.png"
-            alt="EAT"
-            width={36}
-            height={36}
-            className="rounded-full"
-            priority
-          />
-          <div>
-            <div className="text-base font-semibold text-ink">EAT Inventory</div>
-            <div className="text-[11px] text-neutral-400">storage-room live entry</div>
-          </div>
-        </div>
-        <Nav role={user.role} />
-      </aside>
+      {/* desktop sidebar (collapsible to an icon rail) */}
+      <Sidebar allowed={allowed} />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-30 flex items-center justify-between border-b border-neutral-200 bg-white/95 px-4 py-2.5 backdrop-blur md:px-6 md:py-3">
@@ -55,7 +46,8 @@ export default async function AppLayout({
       </div>
 
       {/* phone bottom tabs */}
-      <MobileNav role={user.role} />
+      <MobileNav allowed={allowed} />
+      <InstallHint />
     </div>
   );
 }

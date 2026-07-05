@@ -1,14 +1,15 @@
 import { PageHeader, Card } from "@/components/PageHeader";
 import { EntryForm } from "@/components/EntryForm";
 import { submitAdjustment } from "@/actions/entries";
-import { requireUser, hasRole } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { allActiveSkus, vendors } from "@/lib/queries";
 import { ZOHO_PUSH_LABELS } from "@/lib/zoho/labels";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdjustmentPage() {
-  const s = await requireUser();
+  const { session: s } = await requirePageAccess("/adjustment");
   const [all, vlist] = await Promise.all([allActiveSkus(), vendors()]);
   return (
     <div>

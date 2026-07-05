@@ -12,6 +12,7 @@ import type { PickListDetail, PickListLineRow } from "@/lib/queries";
 import type { PickGate } from "@/lib/workflow";
 import { newToken } from "@/lib/utils";
 import { D } from "@/lib/money";
+import { ReasonDialog } from "@/components/ReasonDialog";
 
 type Msg = { type: "ok" | "err"; text: string } | null;
 
@@ -190,35 +191,41 @@ function OpenList({
     save(lineId, D(line.qtyPicked).plus(D(delta)).toFixed(3));
   }
 
+  const [reasonFor, setReasonFor] = useState<null | "short" | "cancel">(null);
+  // Zoho-parity views: by item (pick here) / by sales order / flat order lines
+  const [view, setView] = useState<"item" | "order" | "flat">("item");
+
   function complete(short: boolean) {
     setMsg(null);
-    let shortReason: string | undefined;
     if (short) {
-      const r = window.prompt("Reason for completing short (surfaces on the Summary):");
-      if (r == null) return;
-      if (r.trim().length < 3) {
-        setMsg({ type: "err", text: "A reason of at least 3 characters is required." });
-        return;
-      }
-      shortReason = r.trim();
+      setReasonFor("short"); // ReasonDialog collects the reason (PWA-safe)
+      return;
     }
     start(async () => {
-      const res = await completePickList(list.id, shortReason ? { shortReason } : undefined);
+      const res = await completePickList(list.id, undefined);
+      if (res.ok) router.refresh();
+      else setMsg({ type: "err", text: res.error });
+    });
+  }
+
+  function completeShortWith(reason: string) {
+    setReasonFor(null);
+    start(async () => {
+      const res = await completePickList(list.id, { shortReason: reason });
       if (res.ok) router.refresh();
       else setMsg({ type: "err", text: res.error });
     });
   }
 
   function cancel() {
-    const r = window.prompt("Reason to cancel this pick list:");
-    if (r == null) return;
-    if (r.trim().length < 3) {
-      setMsg({ type: "err", text: "A cancel reason of at least 3 characters is required." });
-      return;
-    }
     setMsg(null);
+    setReasonFor("cancel");
+  }
+
+  function cancelWith(reason: string) {
+    setReasonFor(null);
     start(async () => {
-      const res = await cancelPickList(list.id, r.trim());
+      const res = await cancelPickList(list.id, reason);
       if (res.ok) router.refresh();
       else setMsg({ type: "err", text: res.error });
     });
@@ -226,6 +233,25 @@ function OpenList({
 
   return (
     <div className="space-y-5">
+      {reasonFor === "short" && (
+        <ReasonDialog
+          title="Complete pick list SHORT"
+          description="Some lines aren't fully picked. The reason surfaces on the Summary sheet."
+          confirmLabel="Complete short"
+          onConfirm={completeShortWith}
+          onCancel={() => setReasonFor(null)}
+        />
+      )}
+      {reasonFor === "cancel" && (
+        <ReasonDialog
+          title="Cancel this pick list"
+          description="Its orders are released and will re-appear on the next Generate."
+          confirmLabel="Cancel list"
+          tone="red"
+          onConfirm={cancelWith}
+          onCancel={() => setReasonFor(null)}
+        />
+      )}
       <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-neutral-600">
@@ -242,7 +268,46 @@ function OpenList({
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
+      {list.unmatchedOrders.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          ⚠ {list.unmatchedOrders.length} order(s) had NO items matching an EAT SKU and were
+          consumed without picking:{" "}
+          <span className="font-mono text-xs">{list.unmatchedOrders.join(", ")}</span>. Check the
+          SKU spelling in Zoho or the SKU list in Admin.
+        </div>
+      )}
+
+      {/* grouping views — same options Zoho's picklist offers */}
+      <div className="flex gap-1 rounded-lg bg-neutral-100 p-1 md:max-w-md">
+        {(
+          [
+            { key: "item", label: "By item" },
+            { key: "order", label: "By sales order" },
+            { key: "flat", label: "All order lines" },
+          ] as const
+        ).map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setView(t.key)}
+            className={`flex-1 rounded-md px-3 py-2 text-sm font-medium ${
+              view === t.key ? "bg-white text-neutral-900 shadow-sm" : "text-neutral-500"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {view !== "item" && (
+        <p className="text-xs text-neutral-400">
+          Read-only view — record picked quantities in the “By item” view.
+        </p>
+      )}
+
+      {view === "order" && <ByOrderView lines={lines} />}
+      {view === "flat" && <FlatView lines={lines} />}
+
+      <div className={view === "item" ? "overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm" : "hidden"}>
         <table className="w-full text-sm">
           <thead className="bg-neutral-50 text-left text-xs uppercase tracking-wide text-neutral-500">
             <tr>
@@ -474,6 +539,90 @@ function CompletedCard({ list }: { list: PickListDetail }) {
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------ grouped read-only views */
+
+type LineWithFrom = PickListLineRow;
+
+/** By sales order — one section per source order (Zoho's "group by SO"). */
+function ByOrderView({ lines }: { lines: LineWithFrom[] }) {
+  const byOrder = new Map<string, { code: string; name: string; qty: string; uom: string }[]>();
+  for (const l of lines) {
+    const contribs = l.from.length ? l.from : [{ orderNo: "(unknown order)", qty: l.qtyToPick, sourceType: "" }];
+    for (const f of contribs) {
+      const arr = byOrder.get(f.orderNo) ?? [];
+      arr.push({ code: l.code, name: l.name, qty: f.qty, uom: l.uom });
+      byOrder.set(f.orderNo, arr);
+    }
+  }
+  const orders = [...byOrder.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  if (!orders.length)
+    return <p className="text-sm text-neutral-400">No order breakdown recorded for this list.</p>;
+  return (
+    <div className="space-y-3">
+      {orders.map(([orderNo, rows]) => (
+        <div key={orderNo} className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm">
+          <div className="border-b border-neutral-100 bg-neutral-50/60 px-4 py-2 font-mono text-xs font-semibold text-neutral-600">
+            {orderNo}
+          </div>
+          <table className="w-full text-sm">
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className="border-t border-neutral-50 first:border-t-0">
+                  <td className="px-4 py-1.5">
+                    <span className="font-mono text-xs text-neutral-500">{r.code}</span>{" "}
+                    <span className="text-neutral-700">{r.name}</span>
+                  </td>
+                  <td className="px-4 py-1.5 text-right font-mono text-neutral-600">
+                    {r.qty} {r.uom}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** No grouping — one row per order line (Zoho's flat picklist). */
+function FlatView({ lines }: { lines: LineWithFrom[] }) {
+  const flat: { orderNo: string; code: string; name: string; qty: string; uom: string }[] = [];
+  for (const l of lines) {
+    const contribs = l.from.length ? l.from : [{ orderNo: "(unknown order)", qty: l.qtyToPick, sourceType: "" }];
+    for (const f of contribs)
+      flat.push({ orderNo: f.orderNo, code: l.code, name: l.name, qty: f.qty, uom: l.uom });
+  }
+  flat.sort((a, b) => a.orderNo.localeCompare(b.orderNo) || a.code.localeCompare(b.code));
+  return (
+    <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
+      <table className="w-full text-sm">
+        <thead className="bg-neutral-50 text-left text-xs uppercase tracking-wide text-neutral-500">
+          <tr>
+            <th className="px-4 py-2 font-medium">Order</th>
+            <th className="px-4 py-2 font-medium">SKU</th>
+            <th className="px-4 py-2 text-right font-medium">Qty</th>
+          </tr>
+        </thead>
+        <tbody>
+          {flat.map((r, i) => (
+            <tr key={i} className="border-t border-neutral-50">
+              <td className="px-4 py-1.5 font-mono text-xs text-neutral-500">{r.orderNo}</td>
+              <td className="px-4 py-1.5">
+                <span className="font-mono text-xs text-neutral-500">{r.code}</span>{" "}
+                <span className="text-neutral-700">{r.name}</span>
+              </td>
+              <td className="px-4 py-1.5 text-right font-mono text-neutral-600">
+                {r.qty} {r.uom}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

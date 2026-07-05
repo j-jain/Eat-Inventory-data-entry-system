@@ -105,9 +105,9 @@ export type CombinedStockRow = {
 /**
  * Aniket's complete picture: Zoho stock-on-hand (as of the last Items sync)
  * plus every LOCAL movement whose document hasn't been pushed to Zoho yet.
- * "Pushed" = any ZOHO_PUSH success audit row for the doc (legacy v1 rows
- * count). OPENING docs are excluded — they were seeded FROM Zoho.
- * One grouped query; the NOT EXISTS probe rides idx_audit_action_doc.
+ * v3: "pushed" = a CONFIRMED zoho_push SUCCESS of an inventory-affecting kind
+ * (a Books bill doesn't move stock, and UNKNOWN/FAILED keep the delta visible
+ * until reconciled). OPENING docs are excluded — they were seeded FROM Zoho.
  */
 export async function combinedZohoStock(): Promise<CombinedStockRow[]> {
   const res = await db.execute(sql`
@@ -121,10 +121,11 @@ export async function combinedZohoStock(): Promise<CombinedStockRow[]> {
       FROM stock_ledger l
       WHERE l.doc_type <> 'OPENING'
         AND NOT EXISTS (
-          SELECT 1 FROM app_audit_log a
-          WHERE a.doc_type = l.doc_type::text
-            AND a.doc_id = l.doc_id
-            AND (a.action LIKE 'ZOHO_PUSH:%' OR a.action = 'ZOHO_DRAFT_CREATED')
+          SELECT 1 FROM zoho_push z
+          WHERE z.doc_type = l.doc_type::text
+            AND z.doc_id = l.doc_id
+            AND z.status = 'SUCCESS'
+            AND z.kind IN ('receiving.receive', 'wastage.adj', 'adjustment.adj', 'assembly.bundle')
         )
       GROUP BY l.sku_id
     ) d ON d.sku_id = k.id

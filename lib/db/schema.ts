@@ -120,7 +120,13 @@ export const users = pgTable(
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     fullName: text("full_name").notNull(),
     pinHash: text("pin_hash").notNull(),
+    /** PIN encrypted at rest (AES-GCM, key derived from SESSION_SECRET) so
+     *  admins can view/edit it — a DB dump alone can't reveal PINs. The
+     *  bcrypt hash above stays the verify path. */
+    pinEnc: text("pin_enc"),
     role: userRoleEnum("role").notNull().default("FLOOR"),
+    /** Per-user page allow-list (href keys). NULL = the role's default set. */
+    allowedPages: jsonb("allowed_pages"),
     attempts: integer("attempts").notNull().default(0),
     lockedUntil: timestamp("locked_until", { withTimezone: true }),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
@@ -591,6 +597,11 @@ export const pickListSource = pgTable(
     manualOrderDocId: bigint("manual_order_doc_id", { mode: "number" }).references(
       () => manualOrderDoc.id,
     ),
+    /** human order number snapshot (SO-00042 / manual #7) for grouped views */
+    orderNo: text("order_no"),
+    /** false = the order was consumed but NONE of its lines matched a local
+     *  SKU — surfaced as a warning on the pick list instead of silently lost */
+    matched: boolean("matched").notNull().default(true),
   },
   (t) => [
     uniqueIndex("uq_pick_source_so").on(t.zohoSoId),
@@ -601,6 +612,27 @@ export const pickListSource = pgTable(
        OR (${t.sourceType} = 'MANUAL_ORDER' AND ${t.manualOrderDocId} IS NOT NULL AND ${t.zohoSoId} IS NULL)`,
     ),
   ],
+);
+
+/** Per-line provenance: which order contributed how much to each pick-list
+ *  line — captured at Generate time so the list can be viewed Zoho-style
+ *  (no grouping / by item / by sales order) without regenerating. */
+export const pickListLineSource = pgTable(
+  "pick_list_line_source",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    pickListLineId: bigint("pick_list_line_id", { mode: "number" })
+      .notNull()
+      .references(() => pickListLine.id),
+    sourceType: pickSourceTypeEnum("source_type").notNull(),
+    zohoSoId: text("zoho_so_id"),
+    manualOrderDocId: bigint("manual_order_doc_id", { mode: "number" }).references(
+      () => manualOrderDoc.id,
+    ),
+    orderNo: text("order_no"),
+    qty: qty("qty").notNull(),
+  },
+  (t) => [index("idx_plls_line").on(t.pickListLineId)],
 );
 
 /* =========================================================================
@@ -746,3 +778,77 @@ export const appAuditLog = pgTable(
   // Zoho push idempotency + push-status lookups (Review queue)
   (t) => [index("idx_audit_action_doc").on(t.action, t.docType, t.docId)],
 );
+
+/* =========================================================================
+ * Zoho push state (v3) — the single source of truth for "did this document
+ * reach Zoho". One row per outbound Zoho create (sub_key distinguishes the
+ * per-line requests of a bundle push). The audit log keeps the trail; THIS
+ * table keeps the state. po.update is deliberately absent — PO edits
+ * legitimately repeat and have no create-once lifecycle.
+ * =======================================================================*/
+export const zohoPush = pgTable(
+  "zoho_push",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    kind: text("kind").notNull(), // ZohoPushKind minus po.update
+    docType: text("doc_type").notNull(),
+    docId: bigint("doc_id", { mode: "number" }).notNull(),
+    subKey: text("sub_key").notNull().default("doc"),
+    /** Reference stamped into the Zoho payload — what the reconciler searches for. */
+    idemRef: text("idem_ref"),
+    status: text("status").notNull().default("PENDING"),
+    attempts: integer("attempts").notNull().default(0),
+    zohoId: text("zoho_id"),
+    /** Human document number on Zoho's side (bill number, PO number, …). */
+    zohoNumber: text("zoho_number"),
+    error: text("error"),
+    requestPayload: jsonb("request_payload"),
+    zohoResponse: jsonb("zoho_response"),
+    createdBy: bigint("created_by", { mode: "number" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    pushedAt: timestamp("pushed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("uq_zoho_push_key").on(t.kind, t.docType, t.docId, t.subKey),
+    index("idx_zoho_push_status").on(t.status),
+    index("idx_zoho_push_doc").on(t.docType, t.docId),
+    check(
+      "ck_zoho_push_status",
+      sql`${t.status} IN ('PENDING','IN_FLIGHT','SUCCESS','FAILED','UNKNOWN','SKIPPED')`,
+    ),
+  ],
+);
+
+/* Structured system/error log feeding the developer dashboard. */
+export const systemLog = pgTable(
+  "system_log",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    level: text("level").notNull(), // INFO | WARN | ERROR
+    source: text("source").notNull(), // action/route name, e.g. "zoho-drafts.pushToZoho"
+    message: text("message").notNull(),
+    ctx: jsonb("ctx"),
+    userId: bigint("user_id", { mode: "number" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_system_log_level_time").on(t.level, t.createdAt),
+    index("idx_system_log_source_time").on(t.source, t.createdAt),
+  ],
+);
+
+/* Daily Zoho API budget meter (Standard plan: 2,000 calls/day, 100/min). */
+export const zohoCallCounter = pgTable("zoho_call_counter", {
+  day: date("day").primaryKey(), // IST date
+  calls: integer("calls").notNull().default(0),
+  writes: integer("writes").notNull().default(0),
+});
+
+/* Singleton mutex row for the cron sync (pooler-safe alternative to
+ * advisory locks — pgBouncer transaction pooling breaks session locks). */
+export const syncMutex = pgTable("sync_mutex", {
+  id: integer("id").primaryKey().default(1),
+  lockedAt: timestamp("locked_at", { withTimezone: true }),
+  lockedBy: text("locked_by"),
+});

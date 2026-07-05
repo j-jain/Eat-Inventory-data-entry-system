@@ -1,5 +1,6 @@
 import { PageHeader, Card } from "@/components/PageHeader";
-import { requireUser } from "@/lib/auth/rbac";
+import { hasRole } from "@/lib/auth/rbac";
+import { requirePageAccess } from "@/lib/auth/access";
 import { dailySummary } from "@/lib/queries";
 import { istToday } from "@/lib/workflow";
 
@@ -16,7 +17,7 @@ export default async function SummaryPage({
 }: {
   searchParams: Promise<{ date?: string }>;
 }) {
-  await requireUser();
+  const { session } = await requirePageAccess("/summary");
   const { date: qDate } = await searchParams;
   const date = qDate && /^\d{4}-\d{2}-\d{2}$/.test(qDate) ? qDate : istToday();
   const s = await dailySummary(date);
@@ -38,12 +39,14 @@ export default async function SummaryPage({
           <button className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-50">
             Show
           </button>
-          <a
-            href={`/api/export/summary?date=${date}`}
-            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-50"
-          >
-            CSV ↓
-          </a>
+          {hasRole(session.role, "MANAGER") && (
+            <a
+              href={`/api/export/summary?date=${date}`}
+              className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-50"
+            >
+              CSV ↓
+            </a>
+          )}
         </form>
       </div>
 

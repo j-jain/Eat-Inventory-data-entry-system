@@ -1,6 +1,7 @@
 import { getToken } from "./token";
 import { zohoConfig, ZohoApiError } from "./config";
 import { assertZohoWrite } from "./write-guard";
+import { countZohoCall } from "@/lib/log";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -27,9 +28,11 @@ export async function zohoWrite<T = Record<string, unknown>>(
   const u = new URL(url);
   assertZohoWrite(method, u.pathname);
   let token = await getToken();
+  let lastStatus = 0;
   for (let i = 0; i < attempts; i++) {
     let res: Response;
     try {
+      countZohoCall(true); // every attempt spends daily budget, retries included
       res = await fetch(withOrg(url), {
         method,
         headers: {
@@ -40,9 +43,11 @@ export async function zohoWrite<T = Record<string, unknown>>(
         cache: "no-store",
       });
     } catch (e) {
-      // transport error — do NOT retry a write (it may have been applied)
+      // transport error — do NOT retry a write (it may have been applied).
+      // status 0 = genuinely ambiguous outcome (push-state marks it UNKNOWN).
       throw new ZohoApiError(0, `Zoho ${method} transport error: ${String(e)}`);
     }
+    lastStatus = res.status;
     if (res.status === 401 && i < attempts - 1) {
       token = await getToken(true);
       continue;
@@ -56,14 +61,11 @@ export async function zohoWrite<T = Record<string, unknown>>(
     if (!res.ok) throw new ZohoApiError(res.status, text.slice(0, 500));
     return (text ? JSON.parse(text) : {}) as T;
   }
-  throw new ZohoApiError(0, `Zoho ${method} failed (auth/rate-limit retries exhausted).`);
+  // Retries exhausted on 401/429 — the request was REJECTED before processing,
+  // so surface the real status (a 429 here is safely re-claimable, not UNKNOWN).
+  throw new ZohoApiError(
+    lastStatus,
+    `Zoho ${method} failed (auth/rate-limit retries exhausted, HTTP ${lastStatus}).`,
+  );
 }
 
-/** @deprecated v1 alias — create-only call sites keep working unchanged. */
-export async function zohoCreateDraft<T = Record<string, unknown>>(
-  url: string,
-  body: unknown,
-  attempts = 3,
-): Promise<T> {
-  return zohoWrite<T>("POST", url, body, attempts);
-}

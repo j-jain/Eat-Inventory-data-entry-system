@@ -1,6 +1,7 @@
 import { getToken } from "./token";
 import { zohoConfig, ZohoApiError } from "./config";
 import { assertReadOnly } from "./guard";
+import { countZohoCall } from "@/lib/log";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -24,6 +25,7 @@ export async function zohoGet<T = unknown>(
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
+      countZohoCall(false); // every attempt spends daily budget, retries included
       const res = await fetch(withOrg(url), {
         method: "GET",
         headers: { Authorization: `Zoho-oauthtoken ${token}` },
