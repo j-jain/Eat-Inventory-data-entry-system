@@ -73,14 +73,12 @@ export type ResetResult =
 /**
  * Full reset: clear ALL operational data (entries + ledger + balances) AND the
  * Zoho cache, then re-pull Items/Vendors/Customers/POs fresh from Zoho. Keeps
- * SKUs, users and locations. Testing-only: disabled unless ALLOW_RESET=true (so
- * it cannot run on the production deploy), ADMIN-only, and requires the literal
- * "RESET" confirmation string.
+ * SKUs, users and locations. ADMIN-only and requires the literal "RESET"
+ * confirmation string. Available on every deployment while the system is in
+ * testing — re-gate or remove before going live with real data (DEPLOY.md).
  */
 export async function resetOperationalData(confirm: string): Promise<ResetResult> {
   const s = await requireAdmin();
-  if (process.env.ALLOW_RESET !== "true")
-    return { ok: false, error: "Reset is disabled on this deployment." };
   if (confirm !== "RESET") return { ok: false, error: 'Type "RESET" to confirm.' };
 
   const allTables = [...TX_TABLES, ...ZOHO_CACHE_TABLES];

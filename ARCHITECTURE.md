@@ -99,7 +99,7 @@ Key duplicate-safety properties:
 ### Where Zoho touches the UI
 
 - **Review & Push** ([app/(app)/review/page.tsx](app/(app)/review/page.tsx)) — Aniket's cockpit: Purchase Orders workspace (receive/bill pushes, inline PO edit, close-remainder), Inventory pushes, Books pushes, Combined stock, History. Every card shows the exact payload before sending.
-- **Admin → Zoho Sync** — manual pull buttons + last-20 sync runs + (if `ALLOW_RESET=true`) the reset danger zone. ADMIN-only.
+- **Admin → Zoho Sync** — manual pull buttons + last-20 sync runs + the reset danger zone (testing phase; re-gate before go-live). ADMIN-only.
 - **Admin → Developer** — API budget meter, push health, sync health, error stream.
 - **Receiving** — pre-lists every open PO's lines; **Returns** — live invoice loads.
 - **Cron** (`app/api/cron/sync/route.ts`) — incremental pull, Vercel daily + GitHub Actions 6×/day, `CRON_SECRET`-protected, serialized by a pooler-safe row mutex (`sync_mutex`).
@@ -160,7 +160,7 @@ All routes below sit inside `app/(app)/layout.tsx`, which calls `requireUser()` 
 | `/adjustment` | [app/(app)/adjustment/page.tsx](app/(app)/adjustment/page.tsx) | PO-vs-received-vs-bill tie-outs, manual ± corrections, supervisor overrides. Requires SUPERVISOR role; ADMIN can push below zero |
 | `/purchase-orders` | [app/(app)/purchase-orders/page.tsx](app/(app)/purchase-orders/page.tsx) | Read-only table of open POs cached from Zoho |
 | `/admin/skus` | [app/(app)/admin/skus/page.tsx](app/(app)/admin/skus/page.tsx) + [components/SkuAdmin.tsx](components/SkuAdmin.tsx) | ADMIN-only. Add SKUs, toggle active/inactive (inactive SKUs drop out of entry dropdowns but history is kept) |
-| `/admin/sync` | [app/(app)/admin/sync/page.tsx](app/(app)/admin/sync/page.tsx) | ADMIN-only. Manual Zoho pull buttons, last-20-syncs log table, danger-zone reset (only rendered if `ALLOW_RESET=true`) |
+| `/admin/sync` | [app/(app)/admin/sync/page.tsx](app/(app)/admin/sync/page.tsx) | ADMIN-only. Manual Zoho pull buttons, last-20-syncs log table, danger-zone reset (always shown during the testing phase) |
 | `/login` | [app/login/page.tsx](app/login/page.tsx) + [components/PinLogin.tsx](components/PinLogin.tsx) | Pick your name (SearchSelect) + 4-digit PIN keypad. 5 wrong attempts → 60s lockout |
 | `/` | [app/page.tsx](app/page.tsx) | Redirects to `/dashboard` |
 
@@ -183,7 +183,7 @@ All files are `"use server"` modules — the only way the client mutates data.
 | [actions/zoho-drafts.ts](actions/zoho-drafts.ts) | `pushDraftToZoho(docType, docId)` | Push a saved local doc to Zoho as a draft via the create-only write guard; idempotent (audit-log lookup prevents duplicate pushes) |
 | [actions/returns.ts](actions/returns.ts) | `customerInvoices(customerId)`, `invoiceLines(zohoInvoiceId)` | Live (non-cached) Zoho reads that drive the Returns form's cascading dropdowns |
 | [actions/skus.ts](actions/skus.ts) | `setSkuActive`, `addSku` | ADMIN-only SKU master maintenance |
-| [actions/admin.ts](actions/admin.ts) | `resetOperationalData(confirm)` | Testing-only full wipe of transactional tables + Zoho cache, then re-pull from Zoho. Gated by `ALLOW_RESET=true` env var + ADMIN role + typing "RESET" |
+| [actions/admin.ts](actions/admin.ts) | `resetOperationalData(confirm)` | Testing-phase full wipe of transactional tables + Zoho cache, then re-pull from Zoho. Gated by ADMIN role + typing "RESET" |
 | [actions/auth.ts](actions/auth.ts) | `listLoginUsers`, `signIn`, `signOut` | PIN auth: lockout after 5 attempts (60s), writes a LOGIN audit row, sets the session cookie |
 
 ## 8. Components (`components/*`)

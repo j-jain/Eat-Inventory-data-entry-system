@@ -130,13 +130,13 @@ analysis.
 
 ## 7. Reset (testing phase)
 
-**Admin → Zoho Sync → danger zone**, only when the deployment has
-`ALLOW_RESET=true`, ADMIN-only, requires typing `RESET`. It deletes all
-operational data — entries, ledger, balances, pick lists, PO drafts, push
-state, system logs, API counters, Zoho caches — then re-pulls fresh data from
-Zoho. It **keeps** users, SKUs, locations, Zoho auth, and non-Zoho audit
-history (logins, past resets). Leave `ALLOW_RESET` unset in production once
-live.
+**Admin → Zoho Sync → danger zone**, ADMIN-only, requires typing `RESET`.
+It deletes all operational data — entries, ledger, balances, pick lists, PO
+drafts, push state, system logs, API counters, Zoho caches — then re-pulls
+fresh data from Zoho. It **keeps** users, SKUs, locations, Zoho auth, and
+non-Zoho audit history (logins, past resets). While testing it is available
+on every deployment; re-gate or remove it before going live with real data
+(see DEPLOY.md).
 
 ## 8. When something goes wrong
 
@@ -164,6 +164,7 @@ becomes worth it, it's a schema change we've deliberately parked.
 
 `DATABASE_URL`, `SESSION_SECRET`, `PIN_PEPPER`, `CRON_SECRET`,
 `ZOHO_ENABLED`, `ZOHO_DC`, `ZOHO_ORG_ID`, `ZOHO_CLIENT_ID`,
-`ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ALLOW_RESET` (testing only).
+`ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `DB_POOL_MAX` (optional, keep
+small on serverless, e.g. `3`).
 Set in Vercel → Project → Settings → Environment Variables. Never commit
 values to git (`.env*` is ignored).

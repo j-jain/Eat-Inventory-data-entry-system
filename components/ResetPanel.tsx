@@ -4,10 +4,10 @@ import { useState, useTransition } from "react";
 import { resetOperationalData } from "@/actions/admin";
 
 /**
- * Testing-only danger zone: wipes all operational data AND the Zoho cache, then
- * re-pulls fresh from Zoho. The button only arms once the user types RESET.
- * Rendered only when ALLOW_RESET=true (checked server-side in the page), and the
- * action re-checks the flag + admin role.
+ * Testing-phase danger zone: wipes all operational data AND the Zoho cache, then
+ * re-pulls fresh from Zoho. The button only arms once the user types RESET; the
+ * server action enforces the ADMIN role. Re-gate or remove before go-live with
+ * real data (see DEPLOY.md).
  */
 export function ResetPanel() {
   const [confirm, setConfirm] = useState("");

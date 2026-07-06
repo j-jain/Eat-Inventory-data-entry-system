@@ -62,8 +62,11 @@ In the Vercel project settings (Production scope):
 | `ZOHO_CLIENT_ID` / `ZOHO_CLIENT_SECRET` / `ZOHO_REFRESH_TOKEN` | from step 2 |
 | `CRON_SECRET` | long random string (guards the daily sync endpoint) |
 
-> **Do NOT set `ALLOW_RESET` in production.** It's the kill-switch for the destructive
-> "reset test data" button — set `ALLOW_RESET=true` only on a throwaway/testing deploy.
+> **Reset button:** while the system is in its testing phase, the destructive
+> "reset test data" panel (Admin → Zoho Sync) is always available to ADMIN users —
+> no env flag needed. **Before going live with real data**, re-gate it (restore an
+> `ALLOW_RESET` check in `actions/admin.ts` + `app/(app)/admin/sync/page.tsx`) or
+> remove the panel entirely.
 
 ## 4. Migrate + seed (against Supabase)
 

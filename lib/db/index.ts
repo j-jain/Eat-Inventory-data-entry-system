@@ -31,17 +31,40 @@ function createDb(): DB {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { drizzle } = require("drizzle-orm/node-postgres");
     const isLocal = /localhost|127\.0\.0\.1/.test(url);
+    // Supabase session-mode pooling (port 5432 on the pooler host) caps
+    // concurrent clients at pool_size — a handful of serverless instances
+    // exhausts it and every further request 500s. Transaction mode (:6543)
+    // is the only mode that scales on Vercel (see DEPLOY.md §1).
+    if (/pooler\.supabase\.com:5432/.test(url))
+      console.warn(
+        "[db] DATABASE_URL uses Supabase's SESSION pooler (:5432) — use the transaction pooler (:6543) on serverless or connections will be exhausted",
+      );
     const pool = new Pool({
       connectionString: url,
-      max: Number(process.env.DB_POOL_MAX ?? 5),
+      // Serverless instances multiply pools, so each must stay small.
+      max: Number(process.env.DB_POOL_MAX ?? (process.env.VERCEL ? 3 : 5)),
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 20_000,
+      allowExitOnIdle: true,
       // TLS in transit, but certificate validation is off — Supabase's pooler
       // presents a cert most Node images can't chain. Acceptable for this
       // deployment (Vercel ↔ Supabase over their backbones); to pin instead,
       // download Supabase's CA and pass { ca } here.
       ssl: isLocal ? undefined : { rejectUnauthorized: false },
     });
+    // The pooler reaps idle connections; without a listener that 'error'
+    // event is unhandled and takes down the whole process.
+    pool.on("error", (e: Error) => console.error("[db] idle pool client error:", e.message));
     return drizzle(pool, { schema, casing: "snake_case" }) as DB;
   }
+
+  // PGlite is per-process and file-backed: on Vercel every instance would get
+  // its own empty throwaway DB (data "randomly" differing between devices).
+  // A missing DATABASE_URL in production is always a misconfiguration.
+  if (process.env.FORCE_PGLITE !== "1" && (process.env.VERCEL || process.env.NODE_ENV === "production"))
+    throw new Error(
+      "DATABASE_URL is not set — refusing PGlite fallback in production. Set it to the Supabase transaction pooler string (…pooler.supabase.com:6543).",
+    );
 
   // PGlite local fallback
   // eslint-disable-next-line @typescript-eslint/no-require-imports

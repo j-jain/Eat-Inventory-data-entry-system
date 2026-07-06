@@ -19,7 +19,6 @@ const env = {
   ZOHO_CLIENT_SECRET: "preview-dummy",
   ZOHO_REFRESH_TOKEN: "preview-dummy",
   CRON_SECRET: "preview-secret",
-  ALLOW_RESET: "true",
 };
 
 console.log("[dev-preview] FORCE_PGLITE=1 → local ./.pglite-preview, Zoho creds are dummies");

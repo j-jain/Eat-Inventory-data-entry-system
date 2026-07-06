@@ -57,7 +57,7 @@ export default async function SyncPage() {
           </table>
         </Card>
 
-        {process.env.ALLOW_RESET === "true" && <ResetPanel />}
+        <ResetPanel />
       </div>
     </div>
   );
