@@ -169,6 +169,9 @@ export async function poWorkspace(days = 30): Promise<PoWorkspaceCard[]> {
 
   for (const po of pos) {
     cachedPoIds.add(po.zohoPoId);
+    // Drafts are cached for the PO list but have nothing to receive, push, or
+    // close — keep them out of the workspace and its attention counts.
+    if ((po.status ?? "").toLowerCase() === "draft") continue;
     const raw = Array.isArray(po.lineItems) ? (po.lineItems as Record<string, unknown>[]) : [];
     let ordered = D(0);
     let received = D(0);

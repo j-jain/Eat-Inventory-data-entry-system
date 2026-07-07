@@ -1,0 +1,1 @@
+ALTER TABLE "zoho_po_cache" ADD COLUMN "received_status" text;

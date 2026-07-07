@@ -136,7 +136,7 @@ Drizzle/Postgres, `numeric(14,3)` for quantities and `numeric(14,2)` for money (
 
 ### Zoho read-cache tables
 
-`zoho_token` (single-row OAuth token) · `zoho_item_cache` · `zoho_vendor_cache` · `zoho_customer_cache` · `zoho_po_cache` (line items as `jsonb`) · `zoho_invoice_cache` (line items as `jsonb`) · `sync_log` (entity, status, rows pulled, error — doubles as the incremental watermark)
+`zoho_token` (single-row OAuth token) · `zoho_item_cache` · `zoho_vendor_cache` · `zoho_customer_cache` · `zoho_po_cache` (line items as `jsonb`; holds actionable POs *including drafts* plus Zoho's `received_status` — fully-received/closed/cancelled are evicted; receiving and the review workspace exclude drafts themselves) · `zoho_invoice_cache` (line items as `jsonb`) · `sync_log` (entity, status, rows pulled, error — doubles as the incremental watermark)
 
 ### Audit
 
@@ -267,6 +267,8 @@ receipts — without ADMIN's reset/SKU-master/negative-override powers.
   (`SORT_OUT`/`SORT_IN`, waste stays explicit as `SORT_WASTE` from the bay).
 - **Partial POs** — `openPurchaseOrdersForReceiving` SUMs cumulative accepted per (PO, SKU);
   lines stay on the sheet with `remainingQty` until fully received; voids restore remaining.
+  Draft POs are cached (for the `/purchase-orders` receive-status filter) but excluded here —
+  a draft is never receivable.
 - **Variance scenarios** — S1 free-leftover (extra ₹0 receipt line + record-only TIE_OUT
   adjustment linked via `against='RECEIVING:<id>'`), S2 over-receipt, S4 short-billed-full
   (receipt = bill qty + auto wastage `source=RECEIVING` back-linked via `source_doc_*`).

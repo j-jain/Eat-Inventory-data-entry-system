@@ -174,6 +174,19 @@ describe("PO-only receiving + bay routing", () => {
     expect(line!.alreadyReceivedQty).toBe("5.000");
   });
 
+  it("never lists a DRAFT PO on the receiving sheet (drafts are cached for the PO list only)", async () => {
+    await db.insert(schema.zohoPoCache).values({
+      zohoPoId: "ZP-DRAFT",
+      poNumber: "PO-DRAFT",
+      vendorName: "VendorX",
+      status: "draft",
+      receivedStatus: "pending",
+      lineItems: [{ sku: "MA", name: "Mother A", quantity: 10 }],
+    });
+    const pos = await openPurchaseOrdersForReceiving();
+    expect(pos.find((p) => p.zohoPoId === "ZP-DRAFT")).toBeUndefined();
+  });
+
   it("manager off-PO receipt of a no-sorting SKU goes straight to the cold room", async () => {
     asManager();
     const res = await submitReceivingBatch({

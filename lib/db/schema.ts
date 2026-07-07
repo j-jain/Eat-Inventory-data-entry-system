@@ -715,6 +715,9 @@ export const zohoPoCache = pgTable("zoho_po_cache", {
   vendorName: text("vendor_name"),
   poDate: date("po_date"),
   status: text("status"),
+  // Zoho receive status: pending | partially_received | received. Nullable —
+  // rows synced before this column existed backfill on the next full PO sync.
+  receivedStatus: text("received_status"),
   lineItems: jsonb("line_items"),
   lastModifiedTime: text("last_modified_time"),
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),

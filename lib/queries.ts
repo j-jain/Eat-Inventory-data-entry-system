@@ -1,4 +1,4 @@
-import { and, eq, desc, sql, isNotNull, inArray } from "drizzle-orm";
+import { and, eq, desc, sql, isNotNull, inArray, getTableColumns } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   skus,
@@ -99,7 +99,14 @@ export async function customers() {
 
 export async function openPurchaseOrders() {
   return db
-    .select()
+    .select({
+      ...getTableColumns(zohoPoCache),
+      // Local receipts land before the next Zoho sync — the list uses this to
+      // show "partially received" immediately (upgrade-only, never downgrades).
+      hasLocalReceipt: sql<boolean>`EXISTS (
+        SELECT 1 FROM ${receivingDoc} rd
+        WHERE rd.zoho_po_id = ${zohoPoCache.zohoPoId} AND rd.doc_status = 'POSTED')`,
+    })
     .from(zohoPoCache)
     .orderBy(desc(zohoPoCache.poDate))
     .limit(200);
@@ -150,6 +157,8 @@ export async function openPurchaseOrdersForReceiving(): Promise<ReceivingPo[]> {
     db
       .select()
       .from(zohoPoCache)
+      // Drafts live in the cache for the PO list, but must never be receivable.
+      .where(sql`lower(coalesce(${zohoPoCache.status}, '')) <> 'draft'`)
       .orderBy(desc(zohoPoCache.poDate))
       .limit(200),
     allActiveSkus(),

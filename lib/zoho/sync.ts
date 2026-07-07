@@ -185,11 +185,13 @@ type PO = {
   last_modified_time?: string;
 };
 
-/** A PO still matters to receiving only until it's fully received / closed. */
+/** A PO stays cached until it's fully received / closed. Drafts ARE kept (the
+ *  PO list filters on them); receiving + the review workspace exclude drafts
+ *  themselves — a draft must never be receivable. */
 function isOpenPO(p: PO): boolean {
   const s = (p.status || "").toLowerCase();
   const rs = (p.received_status || "").toLowerCase();
-  if (["closed", "cancelled", "canceled", "void", "rejected", "draft"].includes(s))
+  if (["closed", "cancelled", "canceled", "void", "rejected"].includes(s))
     return false;
   if (rs === "received") return false;
   return true;
@@ -322,6 +324,7 @@ export function syncPurchaseOrders(since?: Date) {
           vendorName: po.vendor_name,
           poDate: po.date ?? null,
           status: po.status,
+          receivedStatus: po.received_status ?? null,
           lineItems,
           lastModifiedTime: po.last_modified_time,
         })
@@ -331,6 +334,7 @@ export function syncPurchaseOrders(since?: Date) {
             poNumber: po.purchaseorder_number,
             vendorName: po.vendor_name,
             status: po.status,
+            receivedStatus: po.received_status ?? null,
             lineItems,
             lastModifiedTime: po.last_modified_time,
             fetchedAt: new Date(),
