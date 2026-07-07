@@ -44,8 +44,11 @@ function createDb(): DB {
       // Serverless instances multiply pools, so each must stay small.
       max: Number(process.env.DB_POOL_MAX ?? (process.env.VERCEL ? 3 : 5)),
       connectionTimeoutMillis: 10_000,
-      idleTimeoutMillis: 20_000,
+      // Short: a connection idling across a serverless freeze comes back as a
+      // dead socket, so the less time spent idle the better.
+      idleTimeoutMillis: 10_000,
       allowExitOnIdle: true,
+      keepAlive: true,
       // TLS in transit, but certificate validation is off — Supabase's pooler
       // presents a cert most Node images can't chain. Acceptable for this
       // deployment (Vercel ↔ Supabase over their backbones); to pin instead,
@@ -55,6 +58,31 @@ function createDb(): DB {
     // The pooler reaps idle connections; without a listener that 'error'
     // event is unhandled and takes down the whole process.
     pool.on("error", (e: Error) => console.error("[db] idle pool client error:", e.message));
+
+    // A frozen instance loses idle sockets silently; the first query on one
+    // fails, a fresh connection works. Retry exactly once, and only for
+    // connection-class failures — SQL errors must surface. db.transaction()
+    // uses pool.connect(), which is deliberately NOT retried (replaying half
+    // a transaction is worse than failing it).
+    const retriable = (e: unknown): boolean => {
+      const { code, message } = (e ?? {}) as { code?: string; message?: string };
+      return (
+        ["57P01", "08001", "08003", "08006"].includes(code ?? "") ||
+        /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|Connection terminated|timeout exceeded when trying to connect/i.test(
+          message ?? "",
+        )
+      );
+    };
+    const origQuery = pool.query.bind(pool);
+    pool.query = (...args: unknown[]) => {
+      // callback form bypasses the retry (drizzle only uses promises)
+      if (typeof args[args.length - 1] === "function") return origQuery(...args);
+      return origQuery(...args).catch((e: unknown) => {
+        if (!retriable(e)) throw e;
+        console.warn("[db] retrying after connection error:", (e as Error).message);
+        return origQuery(...args);
+      });
+    };
     return drizzle(pool, { schema, casing: "snake_case" }) as DB;
   }
 

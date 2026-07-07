@@ -12,6 +12,7 @@ import type { PickListDetail, PickListLineRow } from "@/lib/queries";
 import type { PickGate } from "@/lib/workflow";
 import { newToken } from "@/lib/utils";
 import { D } from "@/lib/money";
+import { refreshIfHealthy } from "@/lib/refresh";
 import { ReasonDialog } from "@/components/ReasonDialog";
 
 type Msg = { type: "ok" | "err"; text: string } | null;
@@ -30,7 +31,7 @@ export function PickListClient({
   // Poll for freshness (paused when the tab is hidden).
   useEffect(() => {
     const id = setInterval(() => {
-      if (!document.hidden) router.refresh();
+      if (!document.hidden) void refreshIfHealthy(router);
     }, 10000);
     return () => clearInterval(id);
   }, [router]);

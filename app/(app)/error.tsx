@@ -8,6 +8,10 @@ import { useEffect } from "react";
  * The digest is what to quote when reporting — the full error is in the
  * server logs / Admin → Developer.
  */
+// Module-level so it survives the boundary remounting on every error: at most
+// one automatic reset per window, so a persistent failure can't retry-loop.
+let lastAutoReset = 0;
+
 export default function AppError({
   error,
   reset,
@@ -20,6 +24,17 @@ export default function AppError({
     // client-side render crashes
     console.error(error);
   }, [error]);
+
+  // Transient crashes (dead DB connection after a serverless freeze, a network
+  // blip mid-refresh) almost always succeed on retry — recover unattended
+  // floor devices automatically instead of waiting for a manual reload.
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastAutoReset < 15_000) return;
+    lastAutoReset = now;
+    const t = setTimeout(reset, 2_500);
+    return () => clearTimeout(t);
+  }, [reset]);
 
   return (
     <div className="mx-auto mt-16 max-w-md rounded-xl border border-red-200 bg-white p-6 text-center shadow-sm">

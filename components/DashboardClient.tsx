@@ -12,6 +12,7 @@ import type {
 } from "@/lib/dashboard";
 import { D } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { refreshIfHealthy } from "@/lib/refresh";
 
 type TabKey = "receiving" | "cold" | "finished";
 
@@ -35,7 +36,7 @@ export function DashboardClient({ data }: { data: DashboardInventory }) {
   // the pick list — replaces the old /api/stock client-merge polling)
   useEffect(() => {
     const t = setInterval(() => {
-      if (!document.hidden) router.refresh();
+      if (!document.hidden) void refreshIfHealthy(router);
     }, 15_000);
     return () => clearInterval(t);
   }, [router]);
