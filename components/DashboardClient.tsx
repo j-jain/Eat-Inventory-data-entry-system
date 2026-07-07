@@ -32,12 +32,14 @@ export function DashboardClient({ data }: { data: DashboardInventory }) {
   const [tab, setTab] = useState<TabKey>("cold");
   const [q, setQ] = useState("");
 
-  // refresh server data every 15s while the tab is visible (same pattern as
-  // the pick list — replaces the old /api/stock client-merge polling)
+  // refresh server data every ~60s while the tab is visible (same pattern as
+  // the pick list — replaces the old /api/stock client-merge polling). Jitter
+  // de-syncs a fleet of floor devices so they don't hit the DB in lockstep.
   useEffect(() => {
+    const period = 60_000 + Math.random() * 5_000;
     const t = setInterval(() => {
       if (!document.hidden) void refreshIfHealthy(router);
-    }, 15_000);
+    }, period);
     return () => clearInterval(t);
   }, [router]);
 

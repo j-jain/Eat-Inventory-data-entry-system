@@ -8,7 +8,8 @@
  */
 export async function refreshIfHealthy(router: { refresh: () => void }): Promise<void> {
   try {
-    const r = await fetch("/api/health", { cache: "no-store" });
+    // Timeout so a hung preflight can't stack up behind the poll interval.
+    const r = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(5_000) });
     if (!r.ok) return;
   } catch {
     return;

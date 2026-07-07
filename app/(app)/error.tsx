@@ -8,9 +8,11 @@ import { useEffect } from "react";
  * The digest is what to quote when reporting — the full error is in the
  * server logs / Admin → Developer.
  */
-// Module-level so it survives the boundary remounting on every error: at most
-// one automatic reset per window, so a persistent failure can't retry-loop.
+// Module-level so they survive the boundary remounting on every error: at most
+// one automatic reset / one crash report per window, so a persistent failure
+// can't retry-loop or spam system_log.
 let lastAutoReset = 0;
+let lastReport = 0;
 
 export default function AppError({
   error,
@@ -20,19 +22,34 @@ export default function AppError({
   reset: () => void;
 }) {
   useEffect(() => {
-    // server components already log via withLog/system_log; this covers
-    // client-side render crashes
     console.error(error);
+    // Server errors reach system_log via instrumentation.ts; client render
+    // crashes would otherwise vanish — ship them to Admin → Developer.
+    const now = Date.now();
+    if (now - lastReport < 30_000) return;
+    lastReport = now;
+    fetch("/api/client-log", {
+      method: "POST",
+      keepalive: true, // survives the reset() remount
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: error.message,
+        digest: error.digest,
+        stack: error.stack?.slice(0, 2000),
+        path: location.pathname,
+      }),
+    }).catch(() => {}); // reporting must never crash the crash page
   }, [error]);
 
   // Transient crashes (dead DB connection after a serverless freeze, a network
   // blip mid-refresh) almost always succeed on retry — recover unattended
-  // floor devices automatically instead of waiting for a manual reload.
+  // floor devices automatically, but back off hard on persistent failures
+  // instead of re-running the failed page's whole query set every 15s.
   useEffect(() => {
     const now = Date.now();
-    if (now - lastAutoReset < 15_000) return;
+    if (now - lastAutoReset < 60_000) return;
     lastAutoReset = now;
-    const t = setTimeout(reset, 2_500);
+    const t = setTimeout(reset, 5_000 + Math.random() * 5_000);
     return () => clearTimeout(t);
   }, [reset]);
 

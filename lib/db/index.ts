@@ -41,9 +41,19 @@ function createDb(): DB {
       );
     const pool = new Pool({
       connectionString: url,
-      // Serverless instances multiply pools, so each must stay small.
-      max: Number(process.env.DB_POOL_MAX ?? (process.env.VERCEL ? 3 : 5)),
+      // Serverless instances multiply pools, so each must stay modest — but a
+      // single dashboard render fans out 5 parallel queries, so 3 self-starves.
+      // 8 fits one full fan-out with headroom; even ~20 warm instances stay
+      // under Supavisor's default client limit.
+      max: Number(process.env.DB_POOL_MAX ?? (process.env.VERCEL ? 8 : 5)),
       connectionTimeoutMillis: 10_000,
+      // A hung query must fail fast, not squat on a pool slot until the Vercel
+      // function limit. statement_timeout is server-side (the transaction
+      // pooler may strip startup params); query_timeout is the client-side
+      // backstop that always applies, 2s wider so the clean server cancel
+      // (57014) wins when it can.
+      statement_timeout: 10_000,
+      query_timeout: 12_000,
       // Short: a connection idling across a serverless freeze comes back as a
       // dead socket, so the less time spent idle the better.
       idleTimeoutMillis: 10_000,

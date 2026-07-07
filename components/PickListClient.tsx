@@ -28,11 +28,14 @@ export function PickListClient({
 }) {
   const router = useRouter();
 
-  // Poll for freshness (paused when the tab is hidden).
+  // Poll for freshness (paused when the tab is hidden). ~30s is enough — the
+  // poll only surfaces *other* devices' picks (saves round-trip anyway), and
+  // jitter de-syncs fleet devices.
   useEffect(() => {
+    const period = 30_000 + Math.random() * 5_000;
     const id = setInterval(() => {
       if (!document.hidden) void refreshIfHealthy(router);
-    }, 10000);
+    }, period);
     return () => clearInterval(id);
   }, [router]);
 

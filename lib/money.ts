@@ -4,7 +4,11 @@ Decimal.set({ precision: 30, rounding: Decimal.ROUND_HALF_UP });
 
 export type Num = string | number | Decimal;
 
-export const D = (x: Num): Decimal => new Decimal(x ?? 0);
+// "" / whitespace-only ⇒ 0: number inputs hand back "" while the user is
+// editing, so render-time math must tolerate it; real garbage ("abc") still
+// throws so data bugs stay loud.
+export const D = (x: Num): Decimal =>
+  new Decimal(typeof x === "string" && x.trim() === "" ? 0 : (x ?? 0));
 
 export const add = (a: Num, b: Num) => D(a).plus(D(b));
 export const sub = (a: Num, b: Num) => D(a).minus(D(b));
